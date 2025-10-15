@@ -6,6 +6,7 @@ set -euo pipefail
 # ---- Optional flags/env (do not change default behavior) ---------------------
 NONINTERACTIVE="${NONINTERACTIVE:-}"
 CI_COMPOSE_OVERRIDE="${CI_COMPOSE_OVERRIDE:-}"
+COMPOSE_EXTRA_ARGS="${COMPOSE_EXTRA_ARGS:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -189,7 +190,7 @@ if [ -n "${BACKEND_IMAGE:-}" ] || [ -n "${FRONTEND_IMAGE:-}" ]; then
 fi
 
 echo "Starting Docker services..."
-if ! $COMPOSE_CMD $COMPOSE_FILES up -d; then
+if ! $COMPOSE_CMD $COMPOSE_FILES up -d $COMPOSE_EXTRA_ARGS; then
     echo "❌ Failed to start Docker services"
     echo "Check the error messages above and try running:"
     echo "  docker logs airweave-backend"

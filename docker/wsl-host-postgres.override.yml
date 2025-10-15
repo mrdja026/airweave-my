@@ -1,0 +1,40 @@
+# Override to use host Postgres on WSL2 and disable Temporal by default
+services:
+  postgres:
+    # Rebind host port to avoid clash with WSL Postgres
+    ports:
+      - "5433:5432"
+
+  backend:
+    # Ensure container can resolve the Windows host (WSL2/Docker Desktop)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Point backend to host Postgres
+      POSTGRES_HOST: host.docker.internal
+      POSTGRES_PORT: 5432
+      POSTGRES_SSLMODE: disable
+      # Enable Temporal
+      TEMPORAL_ENABLED: "true"
+    # Remove dependency on bundled Postgres; keep Redis/Qdrant
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  temporal:
+    # Start Temporal server alongside the stack (no profiles flag required)
+
+  temporal-ui:
+    # Start Temporal UI alongside the stack
+
+  temporal-worker:
+    # Start Temporal worker alongside the stack
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      POSTGRES_HOST: host.docker.internal
+      POSTGRES_PORT: 5432
+      POSTGRES_SSLMODE: disable
+      TEMPORAL_ENABLED: "true"
