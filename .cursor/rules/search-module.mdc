@@ -145,7 +145,7 @@ For sources with strict rate limits or massive data volumes (e.g., Slack), **fed
 **How It Works:**
 1. Collection contains both vector-synced sources and federated sources
 2. User submits search query
-3. LLM extracts 8-10 keywords from query and expansions
+3. LLM extracts exactly 5 keywords from query and expansions
 4. Federated sources are searched in parallel with vector database
 5. Each federated source searches with all keywords concurrently
 6. Results are deduplicated by entity_id across keywords
@@ -187,8 +187,22 @@ Defaults are defined in `search/defaults.yml` and loaded via `SearchFactory`:
 - `offset: 0`, `limit: 1000` - Pagination defaults
 
 Provider and model configurations are also in `defaults.yml`:
-- `provider_models`: Model specs per provider (OpenAI, Groq, Cohere)
-- `operation_preferences`: Provider selection order for each operation
+- `provider_models`: Model specs per provider (Cerebras, OpenAI, Groq, Cohere)
+- `operation_preferences`: Provider selection order for each operation with fallback support
+
+**Provider Capabilities:**
+- **Cerebras**: LLM only (llm: gpt-oss-120b, 131K context window)
+- **OpenAI**: Full stack (LLM: gpt-5/gpt-5-nano, embeddings: text-embedding-3-small, rerank: gpt-5-nano)
+- **Groq**: LLM and rerank (llm: openai/gpt-oss-120b/20b, rerank: openai/gpt-oss-120b)
+- **Cohere**: Rerank only (rerank: rerank-v3.5)
+
+**Default Provider Preferences** (from `defaults.yml`):
+- Query expansion: Cerebras → Groq → OpenAI
+- Query interpretation: Cerebras → Groq → OpenAI
+- Embeddings: OpenAI only (no fallback - embeddings must be consistent)
+- Reranking: Cohere → Groq → OpenAI
+- Answer generation: Cerebras → Groq → OpenAI
+- Federated search: Cerebras → Groq → OpenAI
 
 ## Entity Architecture
 
@@ -235,11 +249,14 @@ ChunkEntity builds structured markdown representation:
 - Expands abbreviations and synonyms
 
 ### Provider System (`search/providers/`)
+- **Cerebras** (`cerebras.py`): Ultra-fast LLM inference for structured output and text generation (no embeddings or reranking)
 - **OpenAI** (`openai.py`): Complete provider - LLM, embeddings, reranking
 - **Groq** (`groq.py`): Fast LLM inference and reranking (no embeddings)
 - **Cohere** (`cohere.py`): Specialized reranking API
 - Automatic provider selection based on available API keys
-- Fallback chain for resilience
+- Provider fallback on rate limits (429) and server errors (5xx)
+- Each operation tries providers in preference order from `defaults.yml`
+- Graceful degradation: if first provider fails with retryable error, automatically falls back to next provider
 
 ### Hybrid Search Prefetch
 - Large prefetch limits for broad candidate sets
@@ -284,11 +301,43 @@ vectors: Optional[List[List[float] | SparseEmbedding | None]]
 - Generate answer: `true` (AI completion)
 - Interpret filters: `false` (manual control)
 
+### Provider Fallback System
+
+**Automatic Failover**: Operations automatically try providers in preference order when encountering retryable errors.
+
+**Retryable Errors** (trigger fallback):
+- Rate limits (HTTP 429)
+- Server errors (HTTP 500, 502, 503, 504)
+- Queue exceeded errors
+- Too many requests errors
+
+**Non-Retryable Errors** (fail immediately):
+- Authentication errors (HTTP 401, 403)
+- Validation errors (HTTP 400, 422)
+- Not found errors (HTTP 404)
+
+**Fallback Behavior**:
+1. Operation tries first provider in preference list
+2. If retryable error occurs, logs warning and tries next provider
+3. If non-retryable error occurs, fails immediately
+4. If all providers fail with retryable errors, fails entire search
+5. Successful provider logged at INFO level for observability
+
+**Example Flow**:
+```
+[QueryExpansion] Attempting with provider CerebrasProvider (1/3)
+[QueryExpansion] Provider CerebrasProvider failed with retryable error: 429. Trying next provider...
+[QueryExpansion] Attempting with provider GroqProvider (2/3)
+[QueryExpansion] ✓ Succeeded with fallback provider GroqProvider
+```
+
+**Implementation**: `SearchOperation._execute_with_provider_fallback()` in `operations/_base.py`
+
 ### Graceful Degradation
+- Provider fallback: Automatically tries alternative providers on rate limits/errors
 - Query interpretation failure → continues without extracted filters
 - Reranking failure → returns unranked results
 - Query expansion failure → uses original query only
-- Provider fallback chain for resilience
 
 ## Implementation Details
 
@@ -316,11 +365,14 @@ HTTP status mapping in endpoints:
 ### Critical Gotchas
 1. **Filter format**: Must convert to dict for Qdrant (done automatically in operations)
 2. **Offset with expansion**: Pagination applied after deduplication in bulk search
-3. **Provider dependencies**: Requires at least OpenAI API key for embeddings; other providers optional
+3. **Provider dependencies**: Requires at least OpenAI API key for embeddings; other providers optional but recommended for fallback
 4. **Source names**: Case-sensitive in filters (e.g., "GitHub" not "github")
-5. **Embedding model**: Auto-selected from provider_models configuration
+5. **Embedding model**: Auto-selected from provider_models configuration; no fallback (must be consistent)
 6. **Legacy compatibility**: Both old and new schemas supported via `legacy_adapter.py`
 7. **Operation dependencies**: Orchestrator resolves execution order via topological sort
+8. **Provider validation**: Token budgeting and validation use the **actual provider** being called, not `providers[0]`
+9. **Federated keywords**: Exactly 5 keywords extracted (fixed-size tuple for Cerebras compatibility)
+10. **Provider fallback**: Operations automatically try providers in order; log which provider succeeded at INFO level
 
 ## Search Persistence & Analytics
 
@@ -449,11 +501,32 @@ System prompts are in `search/prompts/`:
 ### Working with Providers
 
 Providers implement capabilities (LLM, embeddings, reranking):
-- **BaseProvider** defines the interface
+- **BaseProvider** defines the interface with `is_retryable_error()` static method for error classification
 - Each provider declares its supported capabilities via `ProviderModelSpec`
-- Factory selects providers based on `operation_preferences` in `defaults.yml`
+- Factory initializes **all available providers** for each operation in preference order
+- Operations receive provider lists and automatically fall back on errors
 - Providers handle tokenization, budgeting, and API calls
-- Add new providers by implementing `BaseProvider` and adding to factory
+- Token validation and budgeting happen **per-provider** (not using first provider)
+- Add new providers by implementing `BaseProvider` and adding to `defaults.yml`
+
+**Provider Fallback Pattern**:
+```python
+# Operations use _execute_with_provider_fallback from base class
+async def call_provider(provider: BaseProvider) -> ResultType:
+    # Validate for THIS specific provider
+    self._validate_for_provider(input, provider, ctx)
+    # Call provider method
+    return await provider.method(args)
+
+result = await self._execute_with_provider_fallback(
+    providers=self.providers,
+    operation_call=call_provider,
+    operation_name="OperationName",
+    ctx=ctx,
+)
+```
+
+**Exception**: `EmbedQuery` uses a single provider (no fallback) because embedding models must remain consistent within a collection for vector similarity to work.
 
 ## Legacy Adapter & Migration
 

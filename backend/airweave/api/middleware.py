@@ -231,6 +231,7 @@ async def validation_exception_handler(
     """
     # Extract basic error messages
     error_messages = unpack_validation_error(exc)
+    logger.error(f"Validation error: {error_messages}")
 
     if settings.LOCAL_CURSOR_DEVELOPMENT:
         # Additional diagnostic information
@@ -259,7 +260,6 @@ async def validation_exception_handler(
                 "error_messages": error_messages,
             },
         )
-    logger.error(f"Validation error: {error_messages}")
 
     return JSONResponse(status_code=422, content=error_messages)
 

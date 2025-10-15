@@ -981,7 +981,7 @@
           "source-connections"
         ],
         "summary": "Run",
-        "description": "Trigger a sync run for a source connection.\n\nRuns are always executed through Temporal workflow engine.",
+        "description": "Trigger a sync run for a source connection.\n\nRuns are always executed through Temporal workflow engine.\n\nArgs:\n    db: Database session\n    source_connection_id: ID of the source connection to run\n    ctx: API context with organization and user information\n    guard_rail: Guard rail service for usage limits\n    force_full_sync: If True, forces a full sync with orphaned entity cleanup\n                    for continuous syncs. Raises 400 error if used on\n                    non-continuous syncs (which are always full syncs).",
         "operationId": "run_source_connections__source_connection_id__run_post",
         "parameters": [
           {
@@ -993,6 +993,18 @@
               "format": "uuid",
               "title": "Source Connection Id"
             }
+          },
+          {
+            "name": "force_full_sync",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Force a full sync ignoring cursor data instead of waiting for the daily cleanup schedule. Only allowed for continuous syncs.",
+              "default": false,
+              "title": "Force Full Sync"
+            },
+            "description": "Force a full sync ignoring cursor data instead of waiting for the daily cleanup schedule. Only allowed for continuous syncs."
           }
         ],
         "responses": {

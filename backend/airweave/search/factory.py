@@ -30,6 +30,7 @@ from airweave.search.operations import (
     UserFilter,
 )
 from airweave.search.providers._base import BaseProvider
+from airweave.search.providers.cerebras import CerebrasProvider
 from airweave.search.providers.cohere import CohereProvider
 from airweave.search.providers.groq import GroqProvider
 from airweave.search.providers.openai import OpenAIProvider
@@ -231,25 +232,35 @@ class SearchFactory:
     def _build_operations(
         self,
         params: Dict[str, Any],
-        providers: Dict[str, BaseProvider],
+        providers: Dict[str, Any],
         federated_sources: List[BaseSource],
         has_vector_sources: bool,
         search_request: SearchRequest,
     ) -> Dict[str, Any]:
-        """Build operation instances for the search context."""
+        """Build operation instances for the search context.
+
+        Args:
+            params: Validated search parameters from request with defaults applied
+            providers: Dict with:
+                - "embed": Single BaseProvider (embeddings must be consistent - no fallback)
+                - Other keys: List[BaseProvider] (with fallback support)
+            federated_sources: List of instantiated federated source objects
+            has_vector_sources: Whether collection has any vector-backed sources
+            search_request: Original search request from user
+        """
         return {
             "query_expansion": (
-                QueryExpansion(provider=providers["expansion"]) if params["expand_query"] else None
+                QueryExpansion(providers=providers["expansion"]) if params["expand_query"] else None
             ),
             "query_interpretation": (
-                QueryInterpretation(provider=providers["interpretation"])
+                QueryInterpretation(providers=providers["interpretation"])
                 if (params["interpret_filters"] and has_vector_sources)
                 else None
             ),
             "embed_query": (
                 EmbedQuery(
                     strategy=params["retrieval_strategy"],
-                    provider=providers["embed"],
+                    provider=providers["embed"],  # Single provider - embeddings must be consistent
                 )
                 if has_vector_sources
                 else None
@@ -277,14 +288,14 @@ class SearchFactory:
                 FederatedSearch(
                     sources=federated_sources,
                     limit=params["limit"],
-                    provider=providers["federated"],
+                    providers=providers["federated"],  # List of providers with fallback
                 )
                 if federated_sources
                 else None
             ),
-            "reranking": Reranking(provider=providers["rerank"]) if params["rerank"] else None,
+            "reranking": (Reranking(providers=providers["rerank"]) if params["rerank"] else None),
             "generate_answer": (
-                GenerateAnswer(provider=providers["answer"]) if params["generate_answer"] else None
+                GenerateAnswer(providers=providers["answer"]) if params["generate_answer"] else None
             ),
         }
 
@@ -317,6 +328,7 @@ class SearchFactory:
     def _get_available_api_keys(self) -> Dict[str, Optional[str]]:
         """Get available API keys from settings."""
         return {
+            "cerebras": getattr(settings, "CEREBRAS_API_KEY", None),
             "groq": getattr(settings, "GROQ_API_KEY", None),
             "openai": getattr(settings, "OPENAI_API_KEY", None),
             "cohere": getattr(settings, "COHERE_API_KEY", None),
@@ -350,13 +362,18 @@ class SearchFactory:
     def _create_embedding_provider(
         self, api_keys: Dict[str, Optional[str]], ctx: ApiContext
     ) -> BaseProvider:
-        """Create embedding provider for vector-backed search."""
-        provider = self._init_provider_with_model_spec("embed_query", api_keys, ctx)
-        if not provider:
+        """Create embedding provider for vector-backed search.
+
+        Note: Returns single provider, not a list. Embeddings must use consistent
+        models within a collection and cannot fallback to different providers.
+        """
+        providers = self._init_all_providers_for_operation("embed_query", api_keys, ctx)
+        if not providers:
             raise ValueError(
                 "Embedding provider required for vector-backed search. Configure OPENAI_API_KEY"
             )
-        return provider
+        # Return first (and only) available embedding provider
+        return providers[0]
 
     def _create_llm_providers(
         self,
@@ -365,49 +382,52 @@ class SearchFactory:
         has_federated_sources: bool,
         has_vector_sources: bool,
         ctx: ApiContext,
-    ) -> Dict[str, BaseProvider]:
-        """Create LLM providers for enabled operations."""
+    ) -> Dict[str, List[BaseProvider]]:
+        """Create LLM provider lists for enabled operations.
+
+        Returns dict mapping operation keys to lists of providers in preference order.
+        """
         providers = {}
 
         # Query expansion
         if params["expand_query"]:
-            self._add_provider_or_error(
+            self._add_provider_list_or_error(
                 providers,
                 "expansion",
                 "query_expansion",
                 api_keys,
                 ctx,
                 "Query expansion enabled but no provider available. "
-                "Configure GROQ_API_KEY or OPENAI_API_KEY",
+                "Configure CEREBRAS_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY",
             )
 
         # Federated search
         if has_federated_sources:
-            self._add_provider_or_error(
+            self._add_provider_list_or_error(
                 providers,
                 "federated",
                 "federated_search",
                 api_keys,
                 ctx,
                 "Federated sources exist but no provider available for keyword extraction. "
-                "Configure GROQ_API_KEY or OPENAI_API_KEY",
+                "Configure CEREBRAS_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY",
             )
 
         # Query interpretation
         if params["interpret_filters"] and has_vector_sources:
-            self._add_provider_or_error(
+            self._add_provider_list_or_error(
                 providers,
                 "interpretation",
                 "query_interpretation",
                 api_keys,
                 ctx,
                 "Query interpretation enabled but no provider available. "
-                "Configure GROQ_API_KEY or OPENAI_API_KEY",
+                "Configure CEREBRAS_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY",
             )
 
         # Reranking
         if params["rerank"]:
-            self._add_provider_or_error(
+            self._add_provider_list_or_error(
                 providers,
                 "rerank",
                 "reranking",
@@ -419,32 +439,35 @@ class SearchFactory:
 
         # Answer generation
         if params["generate_answer"]:
-            self._add_provider_or_error(
+            self._add_provider_list_or_error(
                 providers,
                 "answer",
                 "generate_answer",
                 api_keys,
                 ctx,
                 "Answer generation enabled but no provider available. "
-                "Configure GROQ_API_KEY or OPENAI_API_KEY",
+                "Configure CEREBRAS_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY",
             )
 
         return providers
 
-    def _add_provider_or_error(
+    def _add_provider_list_or_error(
         self,
-        providers: Dict[str, BaseProvider],
+        providers: Dict[str, List[BaseProvider]],
         key: str,
         operation_name: str,
         api_keys: Dict[str, Optional[str]],
         ctx: ApiContext,
         error_message: str,
     ):
-        """Add a provider to the dict or raise an error if unavailable."""
-        provider = self._init_provider_with_model_spec(operation_name, api_keys, ctx)
-        if not provider:
+        """Add a provider list to the dict or raise an error if none available."""
+        provider_list = self._init_all_providers_for_operation(operation_name, api_keys, ctx)
+        if not provider_list:
             raise ValueError(error_message)
-        providers[key] = provider
+        providers[key] = provider_list
+        ctx.logger.debug(
+            f"[SearchFactory] Initialized {len(provider_list)} provider(s) for {operation_name}"
+        )
 
     async def _has_vector_sources(self, db: AsyncSession, collection, ctx: ApiContext) -> bool:
         """Return True if collection has any non-federated (vector-backed) sources."""
@@ -468,12 +491,18 @@ class SearchFactory:
                 f"Error getting vector sources for collection {collection.readable_id}"
             )
 
-    def _init_provider_with_model_spec(
+    def _init_all_providers_for_operation(
         self, operation_name: str, api_keys: Dict[str, Optional[str]], ctx: ApiContext
-    ) -> Optional[BaseProvider]:
-        """Select and initialize provider for an operation."""
+    ) -> List[BaseProvider]:
+        """Initialize ALL available providers for an operation in preference order.
+
+        Returns list of working providers that can be used for fallback.
+        Operations will try providers in order until one succeeds.
+        """
         preferences = operation_preferences.get(operation_name, {})
         order = preferences.get("order", [])
+
+        initialized_providers: List[BaseProvider] = []
 
         # Try each provider in preference order
         for entry in order:
@@ -484,7 +513,7 @@ class SearchFactory:
 
             api_key = api_keys.get(provider_name)
             if not api_key:
-                # API key not available for this provider, try next in fallback order
+                # API key not available for this provider, try next
                 continue
 
             # Get provider's model specifications
@@ -503,31 +532,42 @@ class SearchFactory:
 
             # Initialize provider with complete model spec
             try:
-                if provider_name == "groq":
+                provider = None
+                if provider_name == "cerebras":
+                    ctx.logger.debug(
+                        f"[Factory] Attempting to initialize CerebrasProvider for {operation_name}"
+                    )
+                    provider = CerebrasProvider(api_key=api_key, model_spec=model_spec, ctx=ctx)
+                elif provider_name == "groq":
                     ctx.logger.debug(
                         f"[Factory] Attempting to initialize GroqProvider for {operation_name}"
                     )
-                    return GroqProvider(api_key=api_key, model_spec=model_spec, ctx=ctx)
+                    provider = GroqProvider(api_key=api_key, model_spec=model_spec, ctx=ctx)
                 elif provider_name == "openai":
                     ctx.logger.debug(
                         f"[Factory] Attempting to initialize OpenAIProvider for {operation_name}"
                     )
-                    return OpenAIProvider(api_key=api_key, model_spec=model_spec, ctx=ctx)
+                    provider = OpenAIProvider(api_key=api_key, model_spec=model_spec, ctx=ctx)
                 elif provider_name == "cohere":
                     ctx.logger.debug(
                         f"[Factory] Attempting to initialize CohereProvider for {operation_name}"
                     )
-                    return CohereProvider(api_key=api_key, model_spec=model_spec, ctx=ctx)
+                    provider = CohereProvider(api_key=api_key, model_spec=model_spec, ctx=ctx)
+
+                if provider:
+                    initialized_providers.append(provider)
+                    ctx.logger.debug(
+                        f"[Factory] Successfully initialized {provider_name} for {operation_name}"
+                    )
             except Exception as e:
                 # Provider initialization failed (bad API key, missing tokenizer, etc.)
-                # Try next provider in fallback order
+                # Continue with next provider - don't add to list
                 ctx.logger.warning(
                     f"[Factory] Failed to initialize {provider_name} for {operation_name}: {e}"
                 )
                 continue
 
-        # No provider available with valid API key and configuration
-        return None
+        return initialized_providers
 
     def _build_llm_config(
         self, provider_spec: dict, model_key: Optional[str]

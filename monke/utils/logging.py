@@ -27,8 +27,8 @@ def get_logger(name: str, level: Optional[str] = None) -> logging.Logger:
     log_level = getattr(logging, level.upper()) if level else logging.INFO
     logger.setLevel(log_level)
 
-    # Create rich handler
-    console = Console()
+    # Create rich handler with full terminal width
+    console = Console(width=None, force_terminal=True)
     rich_handler = RichHandler(
         console=console, show_time=True, show_path=False, markup=True, rich_tracebacks=True
     )

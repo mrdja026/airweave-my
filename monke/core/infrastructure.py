@@ -79,7 +79,7 @@ def _build_connection_payload(config: TestConfig, context: TestContext) -> Dict[
         Dictionary payload for source connection creation
     """
     base_payload = {
-        "name": f"{config.connector.type.title()} Test Connection {int(time.time())}",
+        "name": f"{config.connector.type.title()} Test {int(time.time())}",
         "short_name": config.connector.type,
         "readable_collection_id": context.collection_readable_id,
         "config": config.connector.config_fields,

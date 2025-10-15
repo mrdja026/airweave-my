@@ -70,6 +70,15 @@ class GmailBongo(BaseBongo):
         # Send the emails sequentially (gentle on Gmail limits)
         for tok, subject, body in gen_results:
             email_data = await self._create_test_email(user_email, subject, body)
+
+            # Add INBOX label to ensure email matches default filters
+            # Self-sent emails get SENT label, but we need INBOX for visibility
+            try:
+                await self._add_label_to_email(email_data["id"], "INBOX")
+                self.logger.info(f"✅ Added INBOX label to email: {email_data['id']}")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Could not add INBOX label to {email_data['id']}: {e}")
+
             entities.append(
                 {
                     "type": "message",
@@ -147,54 +156,183 @@ class GmailBongo(BaseBongo):
         deleted_ids = []
 
         for entity in entities:
-            try:
-                # Find the corresponding test email
-                test_email = next(
-                    (email for email in self.test_emails if email["id"] == entity["id"]),
-                    None,
-                )
+            # Find the corresponding test email
+            test_email = next(
+                (email for email in self.test_emails if email["id"] == entity["id"]),
+                None,
+            )
 
-                if test_email:
-                    await self._force_delete_email(test_email["id"])
+            if test_email:
+                delete_success = await self._force_delete_email(test_email["id"])
+                if delete_success:
                     deleted_ids.append(test_email["id"])
                     self.logger.info(f"🗑️ Permanently deleted test email: {test_email['id']}")
                 else:
-                    self.logger.warning(
-                        f"⚠️ Could not find test email for entity: {entity.get('id')}"
-                    )
+                    self.logger.warning(f"⚠️ Failed to delete test email: {test_email['id']}")
+            else:
+                self.logger.warning(
+                    f"⚠️ Could not find test email for entity: {entity.get('id')}"
+                )
 
-                # Rate limiting
-                if len(entities) > 10:
-                    await asyncio.sleep(0.5)
-
-            except Exception as e:
-                self.logger.warning(f"⚠️ Could not delete entity {entity.get('id')}: {e}")
+            # Rate limiting
+            if len(entities) > 10:
+                await asyncio.sleep(0.5)
 
         # VERIFICATION: Check if emails are actually deleted from Gmail
         self.logger.info("🔍 VERIFYING: Checking if emails are actually deleted from Gmail")
+        verification_results = {"confirmed": 0, "still_exists": 0}
+
         for entity in entities:
             if entity["id"] in deleted_ids:
                 is_deleted = await self._verify_email_deleted(entity["id"])
                 if is_deleted:
-                    self.logger.info(f"✅ Email {entity['id']} confirmed deleted from Gmail")
+                    verification_results["confirmed"] += 1
+                    self.logger.debug(f"✅ Email {entity['id']} confirmed deleted from Gmail")
                 else:
+                    verification_results["still_exists"] += 1
                     self.logger.warning(f"⚠️ Email {entity['id']} still exists in Gmail!")
+
+        self.logger.info(
+            f"🔍 Verification complete: {verification_results['confirmed']} confirmed deleted, "
+            f"{verification_results['still_exists']} still exist"
+        )
 
         return deleted_ids
 
     async def cleanup(self):
-        """Clean up any remaining test data."""
-        self.logger.info("🧹 Cleaning up remaining test emails in Gmail")
+        """Completely purge the Gmail workspace of all test-related emails.
 
-        # Force delete any remaining test emails
-        for test_email in self.test_emails:
+        This is a comprehensive cleanup that:
+        1. Deletes all tracked test emails
+        2. Searches for and deletes any leftover test emails from previous runs
+        3. Searches for emails with test-related subjects/content
+        4. Permanently deletes everything found
+        """
+        self.logger.info("🧹🔥 PURGING Gmail workspace - searching for all test-related emails")
+
+        cleanup_stats = {
+            "tracked_deleted": 0,
+            "searched_deleted": 0,
+            "total_deleted": 0,
+            "errors": 0,
+        }
+
+        # Step 1: Delete all tracked test emails
+        if self.test_emails:
+            self.logger.info(f"🧹 Deleting {len(self.test_emails)} tracked test emails")
+            for test_email in self.test_emails:
+                email_id = test_email["id"]
+                delete_success = await self._force_delete_email(email_id)
+                if delete_success:
+                    cleanup_stats["tracked_deleted"] += 1
+                    self.logger.debug(f"✅ Deleted tracked email: {email_id}")
+                else:
+                    cleanup_stats["errors"] += 1
+
+        # Step 2: Search for and delete ALL test-related emails in the workspace
+        # This catches emails from previous failed runs, interrupted tests, etc.
+        self.logger.info("🔍 Searching Gmail workspace for any remaining test emails...")
+
+        search_queries = [
+            # Search for emails with common test patterns
+            "subject:test",
+            "subject:monke",
+            "subject:(Test Email)",
+            # Search for self-sent emails from today (likely test emails)
+            "from:me to:me newer_than:1d",
+        ]
+
+        all_found_ids = set()
+        for query in search_queries:
             try:
-                await self._force_delete_email(test_email["id"])
-                self.logger.info(f"🧹 Force deleted email: {test_email['id']}")
+                found_ids = await self._search_emails(query)
+                all_found_ids.update(found_ids)
+                if found_ids:
+                    self.logger.info(f"🔍 Found {len(found_ids)} emails matching: '{query}'")
             except Exception as e:
-                self.logger.warning(f"⚠️ Could not force delete email {test_email['id']}: {e}")
+                self.logger.warning(f"⚠️ Search failed for query '{query}': {e}")
+
+        # Remove already-tracked emails from the search results
+        tracked_ids = {email["id"] for email in self.test_emails}
+        untracked_found_ids = all_found_ids - tracked_ids
+
+        if untracked_found_ids:
+            self.logger.info(f"🧹 Found {len(untracked_found_ids)} additional test emails to delete")
+            for email_id in untracked_found_ids:
+                delete_success = await self._force_delete_email(email_id)
+                if delete_success:
+                    cleanup_stats["searched_deleted"] += 1
+                    self.logger.debug(f"✅ Deleted found email: {email_id}")
+                else:
+                    cleanup_stats["errors"] += 1
+        else:
+            self.logger.info("✅ No additional test emails found in workspace")
+
+        cleanup_stats["total_deleted"] = cleanup_stats["tracked_deleted"] + cleanup_stats["searched_deleted"]
+
+        # Log cleanup summary
+        if cleanup_stats["errors"] > 0:
+            self.logger.warning(
+                f"🧹🔥 WORKSPACE PURGE completed with errors:\n"
+                f"  • Tracked emails deleted: {cleanup_stats['tracked_deleted']}\n"
+                f"  • Additional emails found and deleted: {cleanup_stats['searched_deleted']}\n"
+                f"  • Total deleted: {cleanup_stats['total_deleted']}\n"
+                f"  • Errors: {cleanup_stats['errors']}"
+            )
+        else:
+            self.logger.info(
+                f"🧹🔥 WORKSPACE PURGE completed successfully:\n"
+                f"  • Tracked emails deleted: {cleanup_stats['tracked_deleted']}\n"
+                f"  • Additional emails found and deleted: {cleanup_stats['searched_deleted']}\n"
+                f"  • Total deleted: {cleanup_stats['total_deleted']}"
+            )
 
     # Helper methods for Gmail API calls
+    async def _search_emails(self, query: str, max_results: int = 100) -> List[str]:
+        """Search Gmail for emails matching a query.
+
+        Args:
+            query: Gmail search query (e.g., "subject:test", "from:me to:me")
+            max_results: Maximum number of results to return
+
+        Returns:
+            List of message IDs
+        """
+        await self._rate_limit()
+
+        message_ids = []
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+                    headers={
+                        "Authorization": f"Bearer {self.access_token}",
+                        "Accept": "application/json",
+                    },
+                    params={
+                        "q": query,
+                        "maxResults": max_results,
+                    },
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    messages = data.get("messages", [])
+                    message_ids = [msg["id"] for msg in messages]
+                elif response.status_code == 404:
+                    # No messages found
+                    pass
+                else:
+                    self.logger.warning(
+                        f"⚠️ Search query failed: {response.status_code} - {response.text}"
+                    )
+
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error searching emails with query '{query}': {e}")
+
+        return message_ids
+
     async def _get_user_email(self) -> str:
         """Get the authenticated user's email address."""
         await self._rate_limit()
@@ -301,26 +439,70 @@ class GmailBongo(BaseBongo):
             return False
 
     async def _force_delete_email(self, message_id: str):
-        """Force delete an email (permanently delete)."""
-        try:
-            # First move to trash if not already there
-            await self._delete_test_email(message_id)
+        """Force delete an email (permanently delete).
 
-            # Then permanently delete
+        Returns True if successfully deleted or already gone (404), False otherwise.
+        """
+        await self._rate_limit()
+
+        try:
             async with httpx.AsyncClient() as client:
-                response = await client.delete(
+                # First check if email exists
+                check_response = await client.get(
                     f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
                     headers={"Authorization": f"Bearer {self.access_token}"},
                 )
 
-                if response.status_code == 204:
-                    self.logger.info(f"🧹 Force deleted email: {message_id}")
+                if check_response.status_code == 404:
+                    # Already deleted - this is success
+                    self.logger.debug(f"Email {message_id} already deleted (404)")
+                    return True
+
+                if check_response.status_code != 200:
+                    self.logger.warning(
+                        f"⚠️ Unexpected response checking {message_id}: {check_response.status_code}"
+                    )
+                    return False
+
+                # Email exists, try to move to trash first
+                await self._rate_limit()
+                trash_response = await client.post(
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}/trash",
+                    headers={"Authorization": f"Bearer {self.access_token}"},
+                )
+
+                if trash_response.status_code == 404:
+                    # Already deleted between check and trash
+                    self.logger.debug(f"Email {message_id} deleted before trash (404)")
+                    return True
+
+                # Now permanently delete
+                await self._rate_limit()
+                delete_response = await client.delete(
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
+                    headers={"Authorization": f"Bearer {self.access_token}"},
+                )
+
+                if delete_response.status_code == 204:
+                    self.logger.debug(f"Permanently deleted email: {message_id}")
+                    return True
+                elif delete_response.status_code == 404:
+                    # Already deleted between trash and delete
+                    self.logger.debug(f"Email {message_id} deleted before permanent delete (404)")
+                    return True
                 else:
                     self.logger.warning(
-                        f"⚠️ Force delete failed for {message_id}: {response.status_code}"
+                        f"⚠️ Force delete failed for {message_id}: {delete_response.status_code}"
                     )
+                    return False
+
         except Exception as e:
-            self.logger.warning(f"Could not force delete {message_id}: {e}")
+            # Check if the exception is due to 404
+            if "404" in str(e) or "not found" in str(e).lower():
+                self.logger.debug(f"Email {message_id} already deleted (exception: {e})")
+                return True
+            self.logger.warning(f"⚠️ Could not force delete {message_id}: {e}")
+            return False
 
     async def _rate_limit(self):
         """Implement rate limiting for Gmail API."""

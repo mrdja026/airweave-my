@@ -1,4 +1,4 @@
-name: Monke – single runner (build once, run all)
+name: Monke – parallel runners
 
 on:
   workflow_dispatch:
@@ -16,23 +16,111 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  all_connectors_one_runner:
-    if: false # Temporarily disabled
+  # Job 1: Build images once and determine connectors
+  build-and-determine:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # For pushing to GHCR
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      connector-count: ${{ steps.set-matrix.outputs.connector-count }}
+      image-tag: ${{ steps.set-tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # Need full history for git diff
+
+      # Set unique image tag for this run
+      - name: Set image tag
+        id: set-tag
+        run: |
+          TAG="monke-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using image tag: $TAG"
+
+      # Setup Docker Buildx for efficient builds
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Login to GitHub Container Registry
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build and push backend image (ONCE for all parallel jobs)
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ghcr.io/${{ github.repository }}/test-backend:${{ steps.set-tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Note: Frontend image not needed for connector tests (backend-only)
+
+      # Determine which connectors to test
+      - name: Determine connectors to test
+        id: set-matrix
+        env:
+          BASE_BRANCH: ${{ github.base_ref || 'main' }}
+        run: |
+          # Use monke.sh CLI to determine connectors (keeps logic DRY)
+          # This returns space-separated list: core + changed, minimum 4 connectors
+          chmod +x ./monke.sh
+
+          echo "Determining connectors using monke.sh..."
+          CONNECTORS=$(./monke.sh --print-connectors --changed)
+
+          echo "Connectors to test: $CONNECTORS"
+
+          # Convert space-separated list to JSON array for matrix
+          MATRIX_JSON="["
+          FIRST=true
+          for connector in $CONNECTORS; do
+            if [[ "$FIRST" == true ]]; then
+              FIRST=false
+            else
+              MATRIX_JSON+=","
+            fi
+            MATRIX_JSON+="\"$connector\""
+          done
+          MATRIX_JSON+="]"
+
+          # Count connectors
+          CONNECTOR_COUNT=$(echo $CONNECTORS | wc -w)
+
+          echo "Final matrix: $MATRIX_JSON"
+          echo "Connector count: $CONNECTOR_COUNT"
+
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          echo "connector-count=$CONNECTOR_COUNT" >> $GITHUB_OUTPUT
+
+  # Job 2: Run tests in parallel (reuses pre-built backend image)
+  test-connectors:
+    needs: build-and-determine
     runs-on: ubuntu-latest
     environment: dev
-    # Add Azure permissions for OIDC authentication
+    name: test-${{ matrix.connector }}
+    strategy:
+      fail-fast: false
+      matrix:
+        connector: ${{ fromJson(needs.build-and-determine.outputs.matrix) }}
+
+    # Add Azure permissions for OIDC authentication + packages read for pulling images
     permissions:
       id-token: write
       contents: read
       pull-requests: read
+      packages: read  # For pulling from GHCR
 
     env:
-      # Tags for locally built images (no registry)
-      BACKEND_TAG: airweave-backend:ci-${{ github.sha }}
-      FRONTEND_TAG: airweave-frontend:ci-${{ github.sha }}
-      TEMPORAL_WORKER_TAG: airweave-temporal-worker:ci-${{ github.sha }}
-      BACKEND_CACHE_DIR: /tmp/.buildx-cache-backend
-      FRONTEND_CACHE_DIR: /tmp/.buildx-cache-frontend
+      # Use pre-built backend image from GHCR (frontend not needed for connector tests)
+      BACKEND_IMAGE: ghcr.io/${{ github.repository }}/test-backend:${{ needs.build-and-determine.outputs.image-tag }}
 
       # Core configuration
       AIRWEAVE_API_URL: http://localhost:8001
@@ -49,62 +137,37 @@ jobs:
         with:
           fetch-depth: 0 # Fetch all history for change detection
 
-      # Build images ONCE on this runner (with repo-scoped local layer caches)
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Restore frontend build cache
-        uses: actions/cache@v4
+      # Login to GitHub Container Registry to pull images
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          path: ${{ env.FRONTEND_CACHE_DIR }}
-          key: buildx-frontend-${{ runner.os }}-${{ hashFiles('frontend/**','frontend/Dockerfile') }}
-          restore-keys: |
-            buildx-frontend-${{ runner.os }}-
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build frontend (cached, load into daemon)
-        uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          file: ./frontend/Dockerfile
-          platforms: linux/amd64
-          load: true
-          push: false
-          tags: ${{ env.FRONTEND_TAG }}
-          cache-from: type=local,src=${{ env.FRONTEND_CACHE_DIR }}
-          cache-to: type=local,dest=${{ env.FRONTEND_CACHE_DIR }},mode=max
-
-      # Force Compose to use the prebuilt images (no rebuild)
-      - name: Compose override (use prebuilt images)
+      # Pull pre-built backend image from Job 1
+      - name: Pull pre-built backend image
         run: |
-          mkdir -p docker
-          cat > docker/docker-compose.ci.yml <<'YAML'
-          services:
-            backend:
-              pull_policy: never
-              environment:
-                # Core dependencies
-                - OPENAI_API_KEY=${OPENAI_API_KEY}
-                - MISTRAL_API_KEY=${MISTRAL_API_KEY}
-                - COHERE_API_KEY=${COHERE_API_KEY}
-                - GROQ_API_KEY=${GROQ_API_KEY}
-                - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
-                # Azure Key Vault for SaaS credentials
-                - AZURE_KEY_VAULT_URL=${AZURE_KEY_VAULT_URL}
-            temporal-worker:
-              pull_policy: never
-              environment:
-                # Core dependencies
-                - OPENAI_API_KEY=${OPENAI_API_KEY}
-                - MISTRAL_API_KEY=${MISTRAL_API_KEY}
-                - COHERE_API_KEY=${COHERE_API_KEY}
-                - GROQ_API_KEY=${GROQ_API_KEY}
-                - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
-                # Azure Key Vault for SaaS credentials
-                - AZURE_KEY_VAULT_URL=${AZURE_KEY_VAULT_URL}
-            frontend:
-              image: ${FRONTEND_TAG}
-              pull_policy: never
-          YAML
+          echo "Pulling pre-built backend image..."
+          docker pull ${{ env.BACKEND_IMAGE }}
+
+          # Tag as local image for docker-compose compatibility
+          docker tag ${{ env.BACKEND_IMAGE }} test-backend:latest
+
+      # Pre-pull infrastructure images in parallel
+      # Note: Each matrix runner is isolated (separate VM), so we must pull on each
+      # GitHub's infrastructure caches Docker Hub images, so this is relatively fast
+      # text2vec-transformers is disabled via docker-compose profile (backend uses OpenAI)
+      - name: Pre-pull infrastructure images
+        run: |
+          echo "Pre-pulling infrastructure images in parallel..."
+          docker pull postgres:16 &
+          docker pull redis:7-alpine &
+          docker pull qdrant/qdrant:latest &
+          docker pull temporalio/auto-setup:1.24.2 &
+          docker pull temporalio/ui:2.26.2 &
+          wait
+          echo "All infrastructure images pre-pulled successfully"
 
       # Python deps (cached)
       - name: Set up Python 3.11
@@ -122,26 +185,49 @@ jobs:
             pip install azure-keyvault-secrets azure-identity
           fi
 
-      # Start the stack ONCE on this runner (override merged with base compose)
-      - name: Start Airweave (single stack)
+      # Setup environment and start services
+      - name: Setup environment and start services
         env:
-          CI_COMPOSE_OVERRIDE: docker/docker-compose.ci.yml
+          # Required for start.sh to skip interactive prompts
+          NONINTERACTIVE: "1"
+          # Skip services not needed for connector tests
+          SKIP_LOCAL_EMBEDDINGS: "1"  # Use OpenAI embeddings (saves ~2GB)
+          SKIP_FRONTEND: "1"  # Backend-only testing (saves time)
+          # Set required environment variables for the containers
+          AUTH0_ENABLED: "false"
+          DEV_MODE: "true"
         run: |
-          # your script is interactive by default; feed "no" answers:
-          printf 'n\nn\n' | ./start.sh
+          # Create .env from example
+          cp .env.example .env
 
-      - name: Wait for backend health
-        run: |
-          for i in {1..60}; do
-            if curl -fsS http://localhost:8001/health >/dev/null; then
-              echo "✅ Airweave backend is healthy"; exit 0
-            fi
-            echo "Waiting for backend... ($i/60)"; sleep 2
-          done
-          echo "❌ Backend not healthy in time"; exit 1
+          # Add AI keys to .env before starting services
+          echo "OPENAI_API_KEY=$OPENAI_API_KEY" >> .env
+          echo "MISTRAL_API_KEY=$MISTRAL_API_KEY" >> .env
+          echo "COHERE_API_KEY=$COHERE_API_KEY" >> .env
+          echo "GROQ_API_KEY=$GROQ_API_KEY" >> .env
+          echo "CEREBRAS_API_KEY=$CEREBRAS_API_KEY" >> .env
+          [[ -n "${AZURE_KEY_VAULT_URL:-}" ]] && echo "AZURE_KEY_VAULT_URL=$AZURE_KEY_VAULT_URL" >> .env || true
 
-      # Run tests using monke.sh wrapper
-      - name: Run acceptance tests
+          echo "Starting services using start.sh..."
+          ./start.sh --noninteractive
+
+          # The script already does health checks, but let's verify
+          echo ""
+          echo "Verifying we're using the correct test images:"
+          docker ps --format "table {{.Names}}\t{{.Image}}" | grep airweave
+          echo ""
+          echo "Final verification of services:"
+          docker ps
+
+          # Backend runs on port 8001 according to start.sh
+          echo "Testing backend on port 8001..."
+          curl -f http://localhost:8001/health || (echo "Backend not healthy"; docker logs airweave-backend; exit 1)
+
+          echo "Backend is healthy and ready for connector tests!"
+
+
+      # Run test for this specific connector
+      - name: Run acceptance test for ${{ matrix.connector }}
         env:
           CI: true # Tells runner to use simple output
           MONKE_NO_VENV: 1 # Skip venv setup in CI
@@ -171,22 +257,26 @@ jobs:
           # Make script executable
           chmod +x ./monke.sh
 
-          # Fetch base branch for change detection in PRs
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch origin ${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}
-            export BASE_BRANCH="origin/${{ github.base_ref }}"
-          else
-            export BASE_BRANCH="origin/main"
-          fi
+          # Create .env file first
+          echo "Creating .env file from .env.example..."
+          cp .env.example .env
+          cp .env.example monke/.env
 
-          # Let monke.sh handle change detection and test execution
-          # The --changed flag will automatically detect what to test based on git diff
-          echo "Running tests for changed connectors vs $BASE_BRANCH..."
-          ./monke.sh --changed
+          # Run single connector test
+          echo "Running test for connector: ${{ matrix.connector }}"
+          ./monke.sh ${{ matrix.connector }}
+
+      # Cleanup Docker containers (like public API tests)
+      - name: Cleanup Docker containers
+        if: always()
+        run: |
+          echo "Cleaning up Docker containers..."
+          docker compose down -v || true
+          docker system prune -f || true
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: monke-logs
+          name: monke-logs-${{ matrix.connector }}
           path: monke/logs/**

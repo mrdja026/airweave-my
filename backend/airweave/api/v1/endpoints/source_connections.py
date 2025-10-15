@@ -228,10 +228,26 @@ async def run(
     source_connection_id: UUID,
     ctx: ApiContext = Depends(deps.get_context),
     guard_rail: GuardRailService = Depends(deps.get_guard_rail_service),
+    force_full_sync: bool = Query(
+        False,
+        description=(
+            "Force a full sync ignoring cursor data instead of waiting for the daily cleanup "
+            "schedule. Only allowed for continuous syncs."
+        ),
+    ),
 ) -> schemas.SourceConnectionJob:
     """Trigger a sync run for a source connection.
 
     Runs are always executed through Temporal workflow engine.
+
+    Args:
+        db: Database session
+        source_connection_id: ID of the source connection to run
+        ctx: API context with organization and user information
+        guard_rail: Guard rail service for usage limits
+        force_full_sync: If True, forces a full sync with orphaned entity cleanup
+                        for continuous syncs. Raises 400 error if used on
+                        non-continuous syncs (which are always full syncs).
     """
     # Check if organization is allowed to process entities
     await guard_rail.is_allowed(ActionType.ENTITIES)
@@ -240,6 +256,7 @@ async def run(
         db,
         id=source_connection_id,
         ctx=ctx,
+        force_full_sync=force_full_sync,
     )
     return run
 

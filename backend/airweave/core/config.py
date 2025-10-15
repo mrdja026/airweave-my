@@ -152,6 +152,10 @@ class Settings(BaseSettings):
     RESEND_API_KEY: Optional[str] = None
     RESEND_FROM_EMAIL: Optional[str] = None
 
+    # Donke integration (internal automation service)
+    DONKE_URL: Optional[str] = None
+    DONKE_API_KEY: Optional[str] = None
+
     # PostHog Analytics Configuration
     # Public API key for open source and hosted platform
     POSTHOG_API_KEY: str = "phc_Ytp26UB3WwGCdjHTpDBI9HQg2ZA38ITMDKI6fE6EPGS"

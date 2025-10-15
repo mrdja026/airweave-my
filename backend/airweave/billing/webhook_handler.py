@@ -194,6 +194,16 @@ class BillingWebhookProcessor:
 
         log.info(f"Subscription created for org {org_id}: {plan}")
 
+        # Notify Donke about paid subscription
+        if plan != BillingPlan.DEVELOPER:
+            await _notify_donke_subscription(
+                org_schema, plan, UUID(org_id), is_yearly=False, log=log
+            )
+            # Send welcome email for Team plans
+            await _send_team_welcome_email(
+                self.db, org_schema, plan, UUID(org_id), is_yearly=False, log=log
+            )
+
     async def _handle_subscription_updated(  # noqa: C901
         self,
         event: stripe.Event,
@@ -885,6 +895,135 @@ class BillingWebhookProcessor:
                     )
 
                     log.info(f"Yearly prepay finalized for org {organization_id}: sub {sub.id}")
+
+                    # Notify Donke about yearly subscription
+                    await _notify_donke_subscription(
+                        org, BillingPlan(plan_str), organization_id, is_yearly=True, log=log
+                    )
+                    # Send welcome email for Team plans
+                    await _send_team_welcome_email(
+                        self.db,
+                        org,
+                        BillingPlan(plan_str),
+                        organization_id,
+                        is_yearly=True,
+                        log=log,
+                    )
         except Exception as e:
             log.error(f"Error finalizing yearly prepay: {e}", exc_info=True)
             raise
+
+
+async def _notify_donke_subscription(
+    org: schemas.Organization,
+    plan: BillingPlan,
+    org_id: UUID,
+    is_yearly: bool,
+    log: ContextualLogger,
+) -> None:
+    """Notify Donke about paid subscription (best-effort).
+
+    Args:
+        org: The organization schema
+        plan: The billing plan
+        org_id: Organization ID
+        is_yearly: Whether this is a yearly subscription
+        log: Contextual logger
+    """
+    import httpx
+
+    from airweave.core.config import settings
+
+    if not settings.DONKE_URL or not settings.DONKE_API_KEY:
+        return
+
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{settings.DONKE_URL}/api/notify-subscription?code={settings.DONKE_API_KEY}",
+                headers={
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "organization_name": org.name,
+                    "plan": plan.value,
+                    "organization_id": str(org_id),
+                    "is_yearly": is_yearly,
+                    "user_email": None,  # Could get from org owner if needed
+                },
+                timeout=5.0,
+            )
+            log.info(f"Notified Donke about subscription for {org_id}")
+    except Exception as e:
+        log.warning(f"Failed to notify Donke: {e}")
+
+
+async def _send_team_welcome_email(
+    db: AsyncSession,
+    org: schemas.Organization,
+    plan: BillingPlan,
+    org_id: UUID,
+    is_yearly: bool,
+    log: ContextualLogger,
+) -> None:
+    """Send welcome email to Team plan subscribers via Donke (best-effort).
+
+    Args:
+        db: Database session
+        org: The organization schema
+        plan: The billing plan
+        org_id: Organization ID
+        is_yearly: Whether this is a yearly subscription
+        log: Contextual logger
+    """
+    import httpx
+    from sqlalchemy import select
+
+    from airweave.core.config import settings
+    from airweave.models.user import User
+    from airweave.models.user_organization import UserOrganization
+
+    # Only send for Team plans
+    if plan != BillingPlan.TEAM:
+        return
+
+    if not settings.DONKE_URL or not settings.DONKE_API_KEY:
+        return
+
+    try:
+        # Get organization owner to send email
+        stmt = (
+            select(User)
+            .join(UserOrganization, User.id == UserOrganization.user_id)
+            .where(
+                UserOrganization.organization_id == org_id,
+                UserOrganization.role == "owner",
+            )
+            .limit(1)
+        )
+        result = await db.execute(stmt)
+        owner = result.scalar_one_or_none()
+
+        if not owner:
+            log.warning(f"No owner found for organization {org_id}, skipping welcome email")
+            return
+
+        # Call Donke to send the welcome email
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{settings.DONKE_URL}/api/send-team-welcome-email?code={settings.DONKE_API_KEY}",
+                headers={
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "organization_name": org.name,
+                    "user_email": owner.email,
+                    "user_name": owner.full_name or owner.email,
+                    "plan": plan.value,
+                    "is_yearly": is_yearly,
+                },
+                timeout=5.0,
+            )
+            log.info(f"Team welcome email sent via Donke for {org_id} to {owner.email}")
+    except Exception as e:
+        log.warning(f"Failed to send Team welcome email via Donke: {e}")

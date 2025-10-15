@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from airweave.core.logging import logger
 from airweave.platform.decorators import source
@@ -27,6 +27,18 @@ from airweave.platform.entities.outlook_mail import (
 )
 from airweave.platform.sources._base import BaseSource
 from airweave.schemas.source_connection import AuthenticationMethod, OAuthType
+
+
+def _should_retry_outlook_request(exception: Exception) -> bool:
+    """Custom retry condition that excludes 404 errors from retrying."""
+    if isinstance(exception, httpx.HTTPStatusError):
+        # Don't retry 404s - let them pass through to call-site handlers
+        if exception.response.status_code == 404:
+            return False
+        # Retry other HTTP errors
+        return True
+    # Retry other exceptions (timeouts, etc.)
+    return True
 
 
 @source(
@@ -204,11 +216,74 @@ class OutlookMailSource(BaseSource):
         logger.info("Creating new OutlookMailSource instance")
         instance = cls()
         instance.access_token = access_token
+
+        # Filter configuration
+        config = config or {}
+        instance.after_date = config.get("after_date")
+        instance.included_folders = config.get("included_folders", ["inbox", "sentitems"])
+        instance.excluded_folders = config.get("excluded_folders", ["junkemail", "deleteditems"])
+
         logger.info(f"OutlookMailSource instance created with config: {config}")
         return instance
 
+    def _should_process_folder(self, folder_data: Dict[str, Any]) -> bool:
+        """Check if folder should be processed based on configured filters."""
+        well_known_name = folder_data.get("wellKnownName", "").lower()
+        display_name = folder_data.get("displayName", "").lower()
+
+        # If no well-known name, can't filter reliably - include by default
+        if not well_known_name:
+            return True
+
+        included_folders = getattr(self, "included_folders", [])
+        excluded_folders = getattr(self, "excluded_folders", [])
+
+        # Check excluded folders first
+        if excluded_folders and well_known_name in [f.lower() for f in excluded_folders]:
+            self.logger.debug(f"Skipping folder {display_name} - matches excluded folders")
+            return False
+
+        # Check included folders
+        if included_folders:
+            if well_known_name not in [f.lower() for f in included_folders]:
+                self.logger.debug(
+                    f"Skipping folder {display_name} - doesn't match included folders"
+                )
+                return False
+
+        return True
+
+    def _message_matches_date_filter(self, message_data: Dict[str, Any]) -> bool:
+        """Check if message matches after_date filter."""
+        after_date = getattr(self, "after_date", None)
+        if not after_date:
+            return True
+
+        received_date_str = message_data.get("receivedDateTime")
+        if not received_date_str:
+            return True
+
+        try:
+            received_date = datetime.fromisoformat(received_date_str.replace("Z", "+00:00"))
+            after_dt = datetime.strptime(after_date, "%Y/%m/%d")
+            # Make after_dt timezone-aware (UTC)
+            from datetime import timezone
+
+            after_dt = after_dt.replace(tzinfo=timezone.utc)
+
+            if received_date < after_dt:
+                self.logger.debug(f"Message {message_data.get('id')} skipped: before after_date")
+                return False
+        except (ValueError, TypeError) as e:
+            self.logger.warning(f"Failed to parse date for message {message_data.get('id')}: {e}")
+
+        return True
+
     @retry(
-        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), reraise=True
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True,
+        retry=retry_if_exception(_should_retry_outlook_request),
     )
     async def _get_with_auth(
         self, client: httpx.AsyncClient, url: str, params: Optional[dict] = None
@@ -338,6 +413,11 @@ class OutlookMailSource(BaseSource):
         parent_breadcrumbs: List[Breadcrumb],
     ) -> AsyncGenerator[ChunkEntity, None]:
         """Yield the folder entity, its messages, initialize delta, then recurse children."""
+        # Check if folder should be processed based on filters
+        if not self._should_process_folder(folder):
+            self.logger.debug(f"Skipping folder {folder.get('displayName')} due to folder filters")
+            return
+
         folder_entity = OutlookMailFolderEntity(
             entity_id=folder["id"],
             breadcrumbs=parent_breadcrumbs,
@@ -419,7 +499,7 @@ class OutlookMailSource(BaseSource):
             self.logger.error(f"Error fetching folders: {str(e)}")
             raise
 
-    async def _generate_message_entities(
+    async def _generate_message_entities(  # noqa: C901
         self,
         client: httpx.AsyncClient,
         folder_entity: OutlookMailFolderEntity,
@@ -464,11 +544,26 @@ class OutlookMailSource(BaseSource):
                         f"in folder {folder_entity.display_name}"
                     )
 
+                    # Apply date filter
+                    if not self._message_matches_date_filter(message_data):
+                        self.logger.debug(
+                            f"Skipping message {message_id} - doesn't match date filter"
+                        )
+                        continue
+
                     # If message doesn't have full data, fetch it
                     if "body" not in message_data:
                         self.logger.debug(f"Fetching full message details for {message_id}")
                         message_url = f"{self.GRAPH_BASE_URL}/me/messages/{message_id}"
-                        message_data = await self._get_with_auth(client, message_url)
+                        try:
+                            message_data = await self._get_with_auth(client, message_url)
+                        except httpx.HTTPStatusError as e:
+                            if e.response.status_code == 404:
+                                self.logger.warning(
+                                    f"Message {message_id} not found (404) - skipping"
+                                )
+                                continue
+                            raise
 
                     # Process the message
                     try:
@@ -647,9 +742,17 @@ class OutlookMailSource(BaseSource):
             # Get attachment content if not already included
             content_bytes = attachment.get("contentBytes")
             if not content_bytes:
-                content_bytes = await self._fetch_attachment_content(
-                    client, message_id, attachment_id
-                )
+                try:
+                    content_bytes = await self._fetch_attachment_content(
+                        client, message_id, attachment_id
+                    )
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 404:
+                        self.logger.warning(
+                            f"Attachment {attachment_id} not found (404) - skipping"
+                        )
+                        return None
+                    raise
 
                 if not content_bytes:
                     self.logger.warning(f"No content found for attachment {attachment_name}")
@@ -775,6 +878,13 @@ class OutlookMailSource(BaseSource):
                 self.logger.info(f"Found {len(changes)} changes in delta response")
 
                 for change in changes:
+                    # Apply date filter to delta changes
+                    if not self._message_matches_date_filter(change):
+                        self.logger.debug(
+                            f"Skipping delta change {change.get('id')} - doesn't match date filter"
+                        )
+                        continue
+
                     async for entity in self._yield_message_change_entities(
                         client=client,
                         change=change,
@@ -934,10 +1044,18 @@ class OutlookMailSource(BaseSource):
             self.cursor.cursor_data["folder_names"] = folder_names
         yield deletion_entity
 
-    async def _emit_folder_add_or_update(
+    async def _emit_folder_add_or_update(  # noqa: C901
         self, client: httpx.AsyncClient, folder: Dict[str, Any]
     ) -> AsyncGenerator[ChunkEntity, None]:
         """Emit folder entity and ensure per-folder message delta is initialized."""
+        # Check if folder should be processed
+        if not self._should_process_folder(folder):
+            self.logger.debug(
+                f"Skipping folder {folder.get('displayName')} in delta - "
+                f"doesn't match folder filters"
+            )
+            return
+
         folder_id = folder.get("id")
         display_name = folder.get("displayName", "")
         parent_folder_id = folder.get("parentFolderId")
@@ -984,6 +1102,15 @@ class OutlookMailSource(BaseSource):
                             )
                             yield deletion_entity
                         continue
+
+                    # Apply date filter
+                    if not self._message_matches_date_filter(change):
+                        self.logger.debug(
+                            f"Skipping message {change.get('id')} in folder init - "
+                            f"doesn't match date filter"
+                        )
+                        continue
+
                     async for entity in self._process_message(
                         client, change, display_name or folder_id, folder_breadcrumb
                     ):
@@ -1006,7 +1133,7 @@ class OutlookMailSource(BaseSource):
         except Exception as e:
             self.logger.warning(f"Failed to initialize message delta for folder {folder_id}: {e}")
 
-    async def _process_delta_changes_url(
+    async def _process_delta_changes_url(  # noqa: C901
         self,
         client: httpx.AsyncClient,
         delta_url: str,
@@ -1042,6 +1169,13 @@ class OutlookMailSource(BaseSource):
                                 deletion_status="removed",
                             )
                             yield deletion_entity
+                        continue
+
+                    # Apply date filter to delta changes
+                    if not self._message_matches_date_filter(change):
+                        self.logger.debug(
+                            f"Skipping delta change {change.get('id')} - doesn't match date filter"
+                        )
                         continue
 
                     if "#microsoft.graph.message" in change_type or change.get("id"):

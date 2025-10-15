@@ -11,7 +11,7 @@ This operation:
   - Writes reordered list back to `state["results"]`
 """
 
-from typing import Any, List
+from typing import Any, Dict, List
 
 from airweave.api.context import ApiContext
 from airweave.search.context import SearchContext
@@ -23,13 +23,15 @@ from ._base import SearchOperation
 class Reranking(SearchOperation):
     """Rerank search results using LLM for improved relevance."""
 
-    def __init__(self, provider: BaseProvider) -> None:
-        """Initialize with LLM provider.
+    def __init__(self, providers: List[BaseProvider]) -> None:
+        """Initialize with list of LLM providers in preference order.
 
         Args:
-            provider: LLM provider for reranking (guaranteed by factory)
+            providers: List of LLM providers for reranking with fallback support
         """
-        self.provider = provider
+        if not providers:
+            raise ValueError("Reranking requires at least one provider")
+        self.providers = providers
 
     def depends_on(self) -> List[str]:
         """Depends on Retrieval and FederatedSearch (if enabled) to have all results merged."""
@@ -60,27 +62,42 @@ class Reranking(SearchOperation):
         offset = context.retrieval.offset if context.retrieval else context.offset
         limit = context.retrieval.limit if context.retrieval else context.limit
 
-        documents, top_n = self._prepare_inputs(context, results, ctx)
+        # Track k/top_n value across provider attempts
+        final_top_n = None
 
-        if not documents:
-            raise RuntimeError(
-                f"Document preparation produced no documents from {len(results)} results. "
-                "This indicates a bug in document extraction logic."
+        # Rerank with provider fallback
+        # Document preparation and top_n calculation happen per-provider
+        async def call_provider(provider: BaseProvider) -> List[Dict[str, Any]]:
+            nonlocal final_top_n
+
+            # Prepare inputs for THIS SPECIFIC provider (max_docs varies by provider)
+            documents, top_n = self._prepare_inputs_for_provider(
+                context, results, provider, offset, limit, ctx
             )
 
-        # Emit reranking start
-        await context.emitter.emit(
-            "reranking_start",
-            {
-                "k": top_n,
-                "model": self.provider.model_spec.rerank_model.name
-                if self.provider.model_spec.rerank_model
-                else None,
-            },
-            op_name=self.__class__.__name__,
-        )
+            if not documents:
+                raise RuntimeError(
+                    f"Document preparation produced no documents from {len(results)} results. "
+                    "This indicates a bug in document extraction logic."
+                )
 
-        rankings = await self.provider.rerank(context.query, documents, top_n)
+            # Emit reranking start with actual k value on first attempt
+            if final_top_n is None:
+                final_top_n = top_n
+                await context.emitter.emit(
+                    "reranking_start",
+                    {"k": top_n},
+                    op_name=self.__class__.__name__,
+                )
+
+            return await provider.rerank(context.query, documents, top_n)
+
+        rankings = await self._execute_with_provider_fallback(
+            providers=self.providers,
+            operation_call=call_provider,
+            operation_name="Reranking",
+            ctx=ctx,
+        )
         ctx.logger.debug(f"[Reranking] Rankings: {rankings}")
 
         if not isinstance(rankings, list) or not rankings:
@@ -94,7 +111,10 @@ class Reranking(SearchOperation):
         )
 
         # Apply rankings, then apply offset and limit to the reranked results
-        reranked = self._apply_rankings(results, rankings, top_n)
+        # Use the top_n from the provider that actually succeeded
+        if final_top_n is None:
+            raise RuntimeError("top_n was never set - this should not happen")
+        reranked = self._apply_rankings(results, rankings, final_top_n)
 
         # Apply pagination after reranking to ensure consistent offset behavior
         paginated = self._apply_pagination(reranked, offset, limit)
@@ -111,34 +131,56 @@ class Reranking(SearchOperation):
             op_name=self.__class__.__name__,
         )
 
-    def _prepare_inputs(
-        self, context: SearchContext, results: List[dict], ctx: ApiContext
+    def _prepare_inputs_for_provider(
+        self,
+        context: SearchContext,
+        results: List[dict],
+        provider: BaseProvider,
+        offset: int,
+        limit: int,
+        ctx: ApiContext,
     ) -> tuple[List[str], int]:
-        """Prepare documents for reranking."""
+        """Prepare documents for reranking for specific provider.
+
+        Args:
+            context: Search context
+            results: Results to rerank
+            provider: The actual provider that will be used (not random!)
+            offset: Pagination offset
+            limit: Pagination limit
+            ctx: API context for logging
+
+        Returns:
+            Tuple of (documents, top_n)
+        """
         if not results:
             return [], 0
 
-        # Get provider's max_documents limit if configured (Cohere has this)
+        # Get THIS provider's max_documents limit if configured (varies by provider!)
         max_docs = None
-        if self.provider.model_spec.rerank_model:
-            max_docs = self.provider.model_spec.rerank_model.max_documents
+        if provider.model_spec.rerank_model:
+            max_docs = provider.model_spec.rerank_model.max_documents
 
         # Cap results to provider's limit if specified
         if max_docs and len(results) > max_docs:
             results_to_rerank = results[:max_docs]
+            ctx.logger.debug(
+                f"[Reranking] Capping to {max_docs} results for {provider.__class__.__name__}"
+            )
         else:
             results_to_rerank = results
 
         documents = self._prepare_documents(results_to_rerank)
 
-        offset = context.retrieval.offset if context.retrieval else context.offset
-        limit = context.retrieval.limit if context.retrieval else context.limit
         top_n = min(len(documents), offset + limit)
 
         if top_n < 1:
             raise ValueError("Computed top_n < 1 for reranking")
 
-        ctx.logger.debug(f"[Reranking] top_n={top_n} (offset={offset}, limit={limit})")
+        ctx.logger.debug(
+            f"[Reranking] top_n={top_n} (offset={offset}, limit={limit}, "
+            f"provider={provider.__class__.__name__})"
+        )
         return documents, top_n
 
     def _prepare_documents(self, results: List[dict]) -> List[str]:

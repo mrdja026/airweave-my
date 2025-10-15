@@ -27,8 +27,19 @@ class GitHubBongo(BaseBongo):
             **kwargs: Additional configuration including repo_name (required), entity_count, file_types
         """
         super().__init__(credentials)
-        # GitHub expects personal_access_token specifically
-        self.personal_access_token = credentials["personal_access_token"]
+        # GitHub authentication - support both direct and Composio auth
+        self.personal_access_token = (
+            credentials.get("personal_access_token")  # Direct auth
+            or credentials.get("access_token")  # Composio OAuth
+            or credentials.get("token")  # Alternative token field
+        )
+
+        if not self.personal_access_token:
+            available_fields = list(credentials.keys())
+            raise ValueError(
+                f"Missing GitHub authentication. Expected 'personal_access_token' (direct) or "
+                f"'access_token' (Composio). Available fields: {available_fields}"
+            )
 
         # repo_name is now in config_fields (kwargs) after migration
         self.repo_name = kwargs.get("repo_name")
@@ -98,9 +109,11 @@ class GitHubBongo(BaseBongo):
                 "expected_content": token,
             }
 
-        # Create all entities in parallel - runtime can handle the concurrency
-        tasks = [create_single_entity(i) for i in range(self.entity_count)]
-        entities = await asyncio.gather(*tasks)
+        # Create entities sequentially to avoid Git reference conflicts
+        entities = []
+        for i in range(self.entity_count):
+            entity = await create_single_entity(i)
+            entities.append(entity)
 
         self.test_files = entities  # Store for later operations
         return entities
@@ -430,39 +443,83 @@ class GitHubBongo(BaseBongo):
     async def _update_test_file(
         self, filename: str, current_sha: str, new_content: str
     ) -> Dict[str, Any]:
-        """Update a test file via GitHub API."""
-        await self._rate_limit()
+        """Update a test file via GitHub API with retry logic for 409 conflicts."""
+        max_attempts = 3
+        attempt = 0
+        
+        while attempt < max_attempts:
+            attempt += 1
+            await self._rate_limit()
 
+            async with httpx.AsyncClient() as client:
+                response = await client.put(
+                    f"https://api.github.com/repos/{self.repo_name}/contents/{filename}",
+                    headers={
+                        "Authorization": f"token {self.personal_access_token}",
+                        "Accept": "application/vnd.github.v3+json",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "message": f"Update monke test file: {filename}",
+                        "content": base64.b64encode(new_content.encode()).decode(),
+                        "sha": current_sha,
+                        "branch": self.branch,
+                    },
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    # Update the stored SHA
+                    for test_file in self.test_files:
+                        if test_file["path"] == filename:
+                            test_file["sha"] = result["content"]["sha"]
+                            break
+                    return result
+                
+                elif response.status_code == 409:
+                    # 409 Conflict - SHA mismatch, need to get fresh SHA and retry
+                    if attempt < max_attempts:
+                        self.logger.warning(f"409 conflict updating {filename}, attempt {attempt}/{max_attempts}, refreshing SHA...")
+                        # Get fresh SHA for the file
+                        fresh_sha = await self._get_file_sha(filename)
+                        if fresh_sha:
+                            current_sha = fresh_sha
+                            # Add small delay before retry
+                            await asyncio.sleep(1 + attempt * 0.5)
+                            continue
+                        else:
+                            raise Exception(f"Failed to get fresh SHA for {filename}")
+                    else:
+                        raise Exception(
+                            f"Failed to update file after {max_attempts} attempts: {response.status_code} - {response.text}"
+                        )
+                else:
+                    raise Exception(
+                        f"Failed to update file: {response.status_code} - {response.text}"
+                    )
+        
+        raise Exception(f"Failed to update file after {max_attempts} attempts")
+
+    async def _get_file_sha(self, filename: str) -> Optional[str]:
+        """Get the current SHA of a file for retry logic."""
+        await self._rate_limit()
+        
         async with httpx.AsyncClient() as client:
-            response = await client.put(
+            response = await client.get(
                 f"https://api.github.com/repos/{self.repo_name}/contents/{filename}",
                 headers={
                     "Authorization": f"token {self.personal_access_token}",
                     "Accept": "application/vnd.github.v3+json",
-                    "Content-Type": "application/json",
                 },
-                json={
-                    "message": f"Update monke test file: {filename}",
-                    "content": base64.b64encode(new_content.encode()).decode(),
-                    "sha": current_sha,
-                    "branch": self.branch,
-                },
+                params={"ref": self.branch},
             )
-
-            if response.status_code != 200:
-                raise Exception(
-                    f"Failed to update file: {response.status_code} - {response.text}"
-                )
-
-            result = response.json()
-
-            # Update the stored SHA
-            for test_file in self.test_files:
-                if test_file["path"] == filename:
-                    test_file["sha"] = result["content"]["sha"]
-                    break
-
-            return result
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result.get("sha")
+            else:
+                self.logger.warning(f"Failed to get SHA for {filename}: {response.status_code}")
+                return None
 
     async def _delete_test_file(self, filename: str, sha: str):
         """Delete a test file via GitHub API."""

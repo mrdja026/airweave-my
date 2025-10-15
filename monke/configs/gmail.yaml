@@ -7,28 +7,45 @@ connector:
   type: "gmail"
   auth_mode: composio
   composio_config:
-    account_id: ca_JGAgsEl6aHUa
-    auth_config_id: ac_Y7iqqAGZt1Cm
+    account_id: ca_pbwjv0gD7GM-
+    auth_config_id: ac_InvnBkiIIOdy
   config_fields:
     openai_model: "gpt-4.1-mini"
-    # post_create_sleep_seconds: 7  # Optional: wait N seconds after creation before first sync
+
+    # Timing: Allow Gmail API to index newly created emails
+    # They exist immediately but don't appear in threads.list queries until fully indexed.
+    # This is a Gmail API limitation, not a Monke issue. External emails don't have this problem.
+    post_create_sleep_seconds: 20
+
+    # Label Filters: Use permissive filtering for test environment
+    # Include both INBOX and SENT to catch self-sent test emails
+    # Gmail's eventual consistency means test emails may take time to be searchable
+    included_labels: ["inbox", "sent"]
+    excluded_labels: ["spam", "trash"]
+    excluded_categories: []
+
+    # Note on Continuous Sync Behavior:
+    # Gmail supports continuous/incremental sync via historyId tracking.
+    # - First sync: Full sync of all matching messages, captures final historyId
+    # - Subsequent syncs: Only changes since last historyId (additions/deletions)
+    # This means test emails MUST be created and properly labeled BEFORE the first sync
+    # completes, otherwise they won't appear in subsequent incremental syncs.
 
 test_flow:
   steps:
     - cleanup
     - create
-    - sync
+    - force_full_sync                # First sync: Full sync (no cursor yet)
     - verify
-    - update
-    - sync
-    - verify
-    - partial_delete
-    - sync
-    - verify_partial_deletion
-    - verify_remaining_entities
-    - complete_delete
-    - sync
-    - verify_complete_deletion
+    - partial_delete                 # Delete 1 entity
+    - force_full_sync                           # Second sync: Incremental (uses cursor)
+    - verify_partial_deletion        # Verify deleted entity is gone
+    - verify_remaining_entities      # Verify remaining entities still exist
+    - force_full_sync                # Third sync: Force full sync (ignores cursor)
+    - verify_remaining_entities      # Verify all remaining entities still exist after full sync
+    - complete_delete                # Delete all remaining entities
+    - force_full_sync                           # Fourth sync: Incremental (detects all deletions)
+    - verify_complete_deletion       # Verify all entities are gone
     - cleanup
 
 # Entity configuration

@@ -48,6 +48,14 @@ provider_models:
       tokenizer: "o200k_harmony"
       context_window: 128000
 
+  cerebras:
+    llm:
+      name: "gpt-oss-120b"
+      tokenizer: "o200k_harmony"
+      context_window: 131000
+    embedding: null
+    rerank: null
+
   cohere:
     llm: null
     embedding: null
@@ -62,6 +70,10 @@ provider_models:
 operation_preferences:
   query_expansion:
     order:
+      - provider: cerebras
+        llm: llm
+        embedding: null
+        rerank: null
       - provider: groq
         llm: llm_big
         embedding: null
@@ -73,6 +85,10 @@ operation_preferences:
 
   query_interpretation:
     order:
+      - provider: cerebras
+        llm: llm
+        embedding: null
+        rerank: null
       - provider: groq
         llm: llm_big
         embedding: null
@@ -106,6 +122,10 @@ operation_preferences:
 
   generate_answer:
     order:
+      - provider: cerebras
+        llm: llm
+        embedding: null
+        rerank: null
       - provider: groq
         llm: llm_big
         embedding: null
@@ -117,6 +137,10 @@ operation_preferences:
 
   federated_search:
     order:
+      - provider: cerebras
+        llm: llm
+        embedding: null
+        rerank: null
       - provider: groq
         llm: llm_big
         embedding: null

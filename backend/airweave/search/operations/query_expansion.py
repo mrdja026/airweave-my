@@ -5,7 +5,7 @@ Uses LLM to generate semantic alternatives that might match relevant documents
 using different terminology while preserving the original search intent.
 """
 
-from typing import Any, List
+from typing import Any, List, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -23,15 +23,16 @@ _NUMBER_OF_EXPANSIONS = 4
 class QueryExpansions(BaseModel):
     """Structured output schema for LLM-generated query expansions."""
 
-    alternatives: List[str] = Field(
+    # Use a fixed-size tuple to generate Cerebras-compatible prefixItems schema
+    model_config = {"extra": "forbid"}
+
+    alternatives: Tuple[str, str, str, str] = Field(
         description=(
             f"Exactly {_NUMBER_OF_EXPANSIONS} UNIQUE and DISTINCT alternative query "
             f"phrasings. Each alternative MUST be different from all others AND "
             f"different from the original query. No duplicates, no repetitions, "
             f"no variations that differ only in punctuation or capitalization."
-        ),
-        min_items=_NUMBER_OF_EXPANSIONS,
-        max_items=_NUMBER_OF_EXPANSIONS,
+        )
     )
 
 
@@ -41,13 +42,15 @@ class QueryExpansion(SearchOperation):
     # Number of query expansion alternatives to generate
     NUMBER_OF_EXPANSIONS = _NUMBER_OF_EXPANSIONS
 
-    def __init__(self, provider: BaseProvider) -> None:
-        """Initialize with LLM provider.
+    def __init__(self, providers: List[BaseProvider]) -> None:
+        """Initialize with list of LLM providers in preference order.
 
         Args:
-            provider: LLM provider for structured output (guaranteed by factory)
+            providers: List of LLM providers for structured output with fallback support
         """
-        self.provider = provider
+        if not providers:
+            raise ValueError("QueryExpansion requires at least one provider")
+        self.providers = providers
 
     def depends_on(self) -> List[str]:
         """No dependencies - runs first if enabled."""
@@ -64,22 +67,29 @@ class QueryExpansion(SearchOperation):
 
         query = context.query
 
-        # Validate query length before sending to LLM
-        self._validate_query_length(query, ctx)
-
         # Build prompts
         system_prompt = QUERY_EXPANSION_SYSTEM_PROMPT.format(
             number_of_expansions=self.NUMBER_OF_EXPANSIONS
         )
         user_prompt = f"Original query: {query}"
 
-        # Get structured output from provider
-        result = await self.provider.structured_output(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            schema=QueryExpansions,
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        # Get structured output from provider with fallback
+        # Note: Token validation happens per-provider in the fallback loop
+        async def call_provider(provider: BaseProvider) -> BaseModel:
+            # Validate query length for this specific provider
+            self._validate_query_length_for_provider(query, provider, ctx)
+            return await provider.structured_output(messages, QueryExpansions)
+
+        result = await self._execute_with_provider_fallback(
+            providers=self.providers,
+            operation_call=call_provider,
+            operation_name="QueryExpansion",
+            ctx=ctx,
         )
 
         # Validate and deduplicate alternatives
@@ -105,28 +115,34 @@ class QueryExpansion(SearchOperation):
             op_name=self.__class__.__name__,
         )
 
-    def _validate_query_length(self, query: str, ctx: ApiContext) -> None:
-        """Validate query fits in provider's context window."""
-        # Get LLM tokenizer from provider
-        tokenizer = getattr(self.provider, "llm_tokenizer", None)
+    def _validate_query_length_for_provider(
+        self, query: str, provider: BaseProvider, ctx: ApiContext
+    ) -> None:
+        """Validate query fits in specific provider's context window.
+
+        This validates against the actual provider that will be used, not a random one.
+        """
+        tokenizer = getattr(provider, "llm_tokenizer", None)
         if not tokenizer:
-            provider_name = self.provider.__class__.__name__
+            provider_name = provider.__class__.__name__
             raise RuntimeError(
                 f"Provider {provider_name} does not have an LLM tokenizer. "
                 "Cannot validate query length."
             )
 
-        token_count = self.provider.count_tokens(query, tokenizer)
-        ctx.logger.debug(f"[QueryExpansion] Token count: {token_count}")
+        token_count = provider.count_tokens(query, tokenizer)
+        ctx.logger.debug(
+            f"[QueryExpansion] Token count for {provider.__class__.__name__}: {token_count}"
+        )
 
         # Estimate prompt overhead: system prompt ~500 tokens, structured output ~500 tokens
         prompt_overhead = 1000
-        max_allowed = self.provider.model_spec.llm_model.context_window - prompt_overhead
+        max_allowed = provider.model_spec.llm_model.context_window - prompt_overhead
 
         if token_count > max_allowed:
             raise ValueError(
-                f"Query too long: {token_count} tokens exceeds max of {max_allowed} "
-                f"for query expansion"
+                f"Query too long for {provider.__class__.__name__}: {token_count} tokens "
+                f"exceeds max of {max_allowed} for query expansion"
             )
 
     def _validate_alternatives(self, alternatives: List[str], original_query: str) -> List[str]:

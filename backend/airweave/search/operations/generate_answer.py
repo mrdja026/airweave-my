@@ -21,9 +21,15 @@ class GenerateAnswer(SearchOperation):
     MAX_COMPLETION_TOKENS = 10000
     SAFETY_TOKENS = 2000
 
-    def __init__(self, provider: BaseProvider) -> None:
-        """Initialize with LLM provider."""
-        self.provider = provider
+    def __init__(self, providers: List[BaseProvider]) -> None:
+        """Initialize with list of LLM providers in preference order.
+
+        Args:
+            providers: List of LLM providers for answer generation with fallback support
+        """
+        if not providers:
+            raise ValueError("GenerateAnswer requires at least one provider")
+        self.providers = providers
 
     def depends_on(self) -> List[str]:
         """Depends on Retrieval, FederatedSearch (if enabled), and Reranking to have all results."""
@@ -38,9 +44,6 @@ class GenerateAnswer(SearchOperation):
         """Generate natural language answer from results."""
         ctx.logger.debug("[GenerateAnswer] Generating natural language answer from results")
 
-        if not self.provider.model_spec.llm_model:
-            raise RuntimeError("LLM model not configured for answer generation provider")
-
         results = state.get("results")
 
         if not results:
@@ -51,39 +54,43 @@ class GenerateAnswer(SearchOperation):
             raise ValueError(f"Expected 'results' to be a list, got {type(results)}")
 
         # Emit completion start
+        # Note: Model name not included since we don't know which provider will succeed yet
         await context.emitter.emit(
             "completion_start",
-            {"model": self.provider.model_spec.llm_model.name},
+            {},
             op_name=self.__class__.__name__,
         )
 
-        formatted_context, chosen_count = self._budget_and_format_results(results, context.query)
-        ctx.logger.debug(
-            f"[GenerateAnswer] number of results that fit in context window: {chosen_count}"
+        # Generate answer with provider fallback
+        # Token budgeting happens per-provider since context windows differ
+        async def call_provider(provider: BaseProvider) -> str:
+            if not provider.model_spec.llm_model:
+                raise RuntimeError("LLM model not configured for provider")
+
+            # Budget and format results for THIS SPECIFIC provider
+            formatted_context, chosen_count = self._budget_and_format_results(
+                results, context.query, provider
+            )
+            ctx.logger.debug(
+                f"[GenerateAnswer] {chosen_count} results fit in {provider.__class__.__name__} "
+                f"context window"
+            )
+
+            # Build messages for LLM
+            system_prompt = GENERATE_ANSWER_SYSTEM_PROMPT.format(context=formatted_context)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": context.query},
+            ]
+
+            return await provider.generate(messages)
+
+        completion = await self._execute_with_provider_fallback(
+            providers=self.providers,
+            operation_call=call_provider,
+            operation_name="GenerateAnswer",
+            ctx=ctx,
         )
-
-        # Emit event showing how many results fit in context
-        await context.emitter.emit(
-            "answer_context_budget",
-            {
-                "total_results": len(results),
-                "results_in_context": chosen_count,
-                "excluded": len(results) - chosen_count,
-            },
-            op_name=self.__class__.__name__,
-        )
-
-        # Build messages for LLM
-        system_prompt = GENERATE_ANSWER_SYSTEM_PROMPT.format(context=formatted_context)
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": context.query},
-        ]
-
-        try:
-            completion = await self.provider.generate(messages)
-        except Exception as e:
-            raise RuntimeError(f"Answer generation failed: {e}") from e
 
         if not completion or not completion.strip():
             raise RuntimeError("Provider returned empty completion")
@@ -97,21 +104,32 @@ class GenerateAnswer(SearchOperation):
             op_name=self.__class__.__name__,
         )
 
-    def _budget_and_format_results(self, results: List[Dict], query: str) -> tuple[str, int]:
-        """Format results while respecting token budget."""
-        tokenizer = getattr(self.provider, "llm_tokenizer", None)
+    def _budget_and_format_results(
+        self, results: List[Dict], query: str, provider: BaseProvider
+    ) -> tuple[str, int]:
+        """Format results while respecting token budget for specific provider.
+
+        Args:
+            results: Search results to format
+            query: User query
+            provider: The actual provider that will be used (not a random one!)
+
+        Returns:
+            Tuple of (formatted_context, chosen_count)
+        """
+        tokenizer = getattr(provider, "llm_tokenizer", None)
         if not tokenizer:
             raise RuntimeError(
                 "LLM tokenizer not initialized. "
                 "Ensure tokenizer is configured in defaults.yml for this provider."
             )
 
-        context_window = self.provider.model_spec.llm_model.context_window
+        context_window = provider.model_spec.llm_model.context_window
         if not context_window:
             raise RuntimeError("Context window not configured for LLM model")
 
         static_text = GENERATE_ANSWER_SYSTEM_PROMPT.format(context="") + query
-        static_tokens = self.provider.count_tokens(static_text, tokenizer)
+        static_tokens = provider.count_tokens(static_text, tokenizer)
 
         budget = context_window - static_tokens - self.MAX_COMPLETION_TOKENS - self.SAFETY_TOKENS
 
@@ -129,8 +147,8 @@ class GenerateAnswer(SearchOperation):
 
         for i, result in enumerate(results):
             formatted_result = self._format_single_result(i + 1, result)
-            result_tokens = self.provider.count_tokens(formatted_result, tokenizer)
-            separator_tokens = self.provider.count_tokens(separator, tokenizer) if i > 0 else 0
+            result_tokens = provider.count_tokens(formatted_result, tokenizer)
+            separator_tokens = provider.count_tokens(separator, tokenizer) if i > 0 else 0
 
             if running_tokens + result_tokens + separator_tokens <= budget:
                 if i > 0:
@@ -144,7 +162,7 @@ class GenerateAnswer(SearchOperation):
         # Ensure at least one result if possible
         if not chosen_parts and results:
             first_result = self._format_single_result(1, results[0])
-            first_tokens = self.provider.count_tokens(first_result, tokenizer)
+            first_tokens = provider.count_tokens(first_result, tokenizer)
             if first_tokens <= budget:
                 return first_result, 1
             raise RuntimeError(

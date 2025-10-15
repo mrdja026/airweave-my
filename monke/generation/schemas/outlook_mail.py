@@ -1,9 +1,10 @@
-from typing import List
-from pydantic import BaseModel, EmailStr, Field
+"""Outlook Mail-specific generation schema."""
+
+from pydantic import BaseModel, Field
 
 
 class OutlookMessage(BaseModel):
-    token: str = Field(description="Verification token")
-    subject: str
-    body_html: str
-    to: List[EmailStr] = Field(default_factory=list)
+    """Schema for Outlook email generation."""
+
+    subject: str = Field(description="Email subject line")
+    body: str = Field(description="Email body content")

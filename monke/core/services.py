@@ -57,6 +57,12 @@ async def _create_bongo(config: TestConfig):
             auth_config_id=config.connector.composio_config.auth_config_id,
         )
         resolved_creds = await broker.get_credentials(config.connector.type)
+        
+        # Pass Composio config to bongo for token refresh
+        composio_config = {
+            "account_id": config.connector.composio_config.account_id,
+            "auth_config_id": config.connector.composio_config.auth_config_id,
+        }
     else:
         # Direct auth mode
         if config.connector.auth_fields:
@@ -64,11 +70,13 @@ async def _create_bongo(config: TestConfig):
         else:
             # Let resolve_credentials handle it
             resolved_creds = await resolve_credentials(config.connector.type, None)
+        composio_config = None
 
-    # Create bongo with resolved credentials
+    # Create bongo with resolved credentials and Composio config
     return BongoRegistry.create(
         config.connector.type,
         resolved_creds,
         entity_count=config.entity_count,
+        composio_config=composio_config,
         **config.connector.config_fields,
     )

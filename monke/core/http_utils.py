@@ -26,12 +26,18 @@ def http_get(path: str, timeout: float = 30.0) -> Any:
     return resp.json()
 
 
-def http_post(path: str, json: Optional[Dict[str, Any]] = None, timeout: float = 30.0) -> Any:
+def http_post(
+    path: str,
+    json: Optional[Dict[str, Any]] = None,
+    params: Optional[Dict[str, Any]] = None,
+    timeout: float = 30.0,
+) -> Any:
     """Perform HTTP POST request to Airweave API."""
     resp = httpx.post(
         f"{get_base_url()}{path}",
         headers=get_headers(),
         json=json,
+        params=params,
         timeout=timeout,
     )
     resp.raise_for_status()

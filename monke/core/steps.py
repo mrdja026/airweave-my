@@ -41,10 +41,18 @@ class CreateStep(TestStep):
 
     async def execute(self) -> None:
         """Create test entities via the connector."""
-        self.logger.info("🥁 Creating test entities")
+        entity_count = self.config.entity_count
+
+        self.logger.info("=" * 80)
+        self.logger.info("🥁 CREATE PHASE: Generating test entities in source system")
+        self.logger.info("=" * 80)
+        self.logger.info(f"📡 Source: {self.config.connector.type}")
+        self.logger.info(f"🎯 Target: Create {entity_count} test entities with tracking tokens")
 
         bongo = self.context.bongo
         entities = await bongo.create_entities()
+
+        self.logger.info(f"✅ Successfully created {len(entities)} entities in {self.config.connector.type}")
 
         # Optional post-create delay to allow upstream APIs to propagate data
         delay_seconds = 0
@@ -60,12 +68,13 @@ class CreateStep(TestStep):
             delay_seconds = 0
 
         if delay_seconds > 0:
-            self.logger.info(
-                f"⏸️ Waiting {delay_seconds}s after creation to allow source API propagation"
-            )
+            self.logger.info(f"⏸️ Post-create delay: Waiting {delay_seconds}s for API propagation...")
+            self.logger.info("   (This allows the source system to index newly created entities)")
             await asyncio.sleep(delay_seconds)
 
-        self.logger.info(f"✅ Created {len(entities)} test entities")
+        self.logger.info("=" * 80)
+        self.logger.info(f"✅ CREATE COMPLETED: {len(entities)} test entities ready for sync")
+        self.logger.info("=" * 80)
 
         # Store entities for later steps and on bongo for deletes
         self.context.created_entities = entities
@@ -76,9 +85,35 @@ class CreateStep(TestStep):
 class SyncStep(TestStep):
     """Sync data to Airweave step."""
 
+    def __init__(self, config, context, force_full_sync: bool = False):
+        """Initialize sync step.
+
+        Args:
+            config: Test configuration
+            context: Test context
+            force_full_sync: If True, forces a full sync ignoring cursor data
+                           (only applicable for continuous syncs)
+        """
+        super().__init__(config, context)
+        self.force_full_sync = force_full_sync
+
     async def execute(self) -> None:
         """Trigger sync and wait for completion."""
-        self.logger.info("🔄 Syncing data to Airweave")
+        self.logger.info("=" * 80)
+        sync_mode = "FORCE FULL SYNC" if self.force_full_sync else "SYNC"
+        self.logger.info(f"🔄 {sync_mode} PHASE: Triggering data synchronization pipeline")
+        if self.force_full_sync:
+            self.logger.info("   🌀 Force full sync enabled - will ignore cursor data and fetch all entities")
+        self.logger.info("=" * 80)
+
+        self.logger.info(f"📡 Source: {self.config.connector.type}")
+        self.logger.info(f"🎯 Target: {self.context.collection_readable_id}")
+
+        # Add delay to allow external APIs (like GitHub) to update their commit history
+        # This prevents race conditions where sync runs before deletions are reflected in API
+        self.logger.info("⏳ Pre-sync delay: Waiting 30s for external API to index changes...")
+        self.logger.info("   (This ensures newly created/modified entities are available in the source API)")
+        await asyncio.sleep(30)
 
         # If a job is already running, wait for it, BUT ALWAYS launch our own sync afterwards
         active_job_id = self._find_active_job_id()
@@ -86,17 +121,26 @@ class SyncStep(TestStep):
             self.logger.info(
                 f"🟡 A sync is already in progress (job {active_job_id}); waiting for it to complete."
             )
+            self.logger.info(
+                "💡 Tip: You can monitor backend sync logs for detailed pipeline execution information"
+            )
             await self._wait_for_sync_completion(target_job_id=active_job_id)
             self.logger.info(
                 "🧭 Previous sync finished; launching a fresh sync to capture recent changes"
             )
+
+        # Prepare query parameters for the sync request
+        params = {}
+        if self.force_full_sync:
+            params["force_full_sync"] = "true"
 
         # Try to start a new sync. If the server says one is already running, wait for that one,
         # then START OUR OWN sync and wait for it too.
         target_job_id: Optional[str] = None
         try:
             run_resp = http_utils.http_post(
-                f"/source-connections/{self.context.source_connection_id}/run"
+                f"/source-connections/{self.context.source_connection_id}/run",
+                params=params,
             )
             target_job_id = str(run_resp["id"])
         except Exception as e:
@@ -118,14 +162,20 @@ class SyncStep(TestStep):
 
                 # IMPORTANT: after the previous job completes, start *our* job
                 run_resp = http_utils.http_post(
-                    f"/source-connections/{self.context.source_connection_id}/run"
+                    f"/source-connections/{self.context.source_connection_id}/run",
+                    params=params,
                 )
                 target_job_id = str(run_resp["id"])
             else:
                 raise  # unknown error
 
         await self._wait_for_sync_completion(target_job_id=target_job_id)
-        self.logger.info("✅ Sync completed")
+
+        self.logger.info("=" * 80)
+        self.logger.info(f"✅ {sync_mode} COMPLETED: Data pipeline execution finished successfully")
+        self.logger.info(f"📊 Job ID: {target_job_id}")
+        self.logger.info("📝 Note: Check backend logs for detailed sync pipeline metrics (entities processed, errors, etc.)")
+        self.logger.info("=" * 80)
 
     def _get_jobs(self) -> List[Dict[str, Any]]:
         """Get list of sync jobs for the source connection, sorted by recency."""
@@ -221,6 +271,10 @@ class SyncStep(TestStep):
             if status == "failed":
                 raise RuntimeError(f"Sync failed: {error or 'unknown error'}")
 
+            # Check for cancellation
+            if status == "cancelled":
+                raise RuntimeError(f"Sync was cancelled (job {target_job_id})")
+
             # Check for completion
             if status == "completed" and completed_at:
                 self.context.last_sync_job_id = str(target_job_id)
@@ -294,23 +348,57 @@ async def _search_collection_async(
 
 
 async def _token_present_in_collection(
-    client, readable_id: str, token: str, limit: int = 1000
+    client, readable_id: str, token: str, limit: int = 1000, expect_present: bool = True
 ) -> bool:
     """
     Check if `token` appears in any result payload (case-insensitive).
     Uses a fixed limit of 1000 for comprehensive search.
+
+    Args:
+        client: Airweave client
+        readable_id: Collection ID
+        token: Token to search for
+        limit: Search limit (always 1000)
+        expect_present: Whether we expect the token to be present (for logging context)
     """
     try:
         # Always use 1000 limit for comprehensive results
         results = await _search_collection_async(client, readable_id, token, 1000)
         token_lower = token.lower()
-        for r in results:
+
+        # Context-aware logging
+        logger = get_logger("monke")
+        logger.info(f"🔍 Searching for token '{token}' in collection '{readable_id}'")
+        logger.info(f"📊 Search returned {len(results)} result(s) from vector database")
+
+        # Log sample results for debugging (only if results exist)
+        if results and len(results) > 0:
+            logger.info("📋 Sample results (showing up to 3):")
+            for i, r in enumerate(results[:3]):
+                payload = r.get("payload", {})
+                score = r.get("score", 0)
+                name = payload.get("name") or payload.get("title") or payload.get("id", "Unknown")
+                logger.info(f"   • Result {i+1}: {name} (score: {score:.3f})")
+
+        # Check if token is present in any result
+        for i, r in enumerate(results):
             payload = r.get("payload", {})
             if payload and token_lower in str(payload).lower():
+                if expect_present:
+                    logger.info(f"✅ Token '{token}' found in vector database (as expected)")
+                else:
+                    logger.warning(f"⚠️ Token '{token}' found but was expected to be deleted!")
                 return True
+
+        # Token not found
+        if expect_present:
+            logger.warning(f"❌ Token '{token}' NOT found in vector database (expected to be present)")
+        else:
+            logger.info(f"✅ Token '{token}' confirmed absent from vector database (as expected)")
         return False
+
     except Exception as e:
-        get_logger("monke").error(f"Error checking token present in collection: {e}")
+        get_logger("monke").error(f"❌ Error checking token in collection: {e}")
         return False
 
 
@@ -329,8 +417,16 @@ class VerifyStep(TestStep):
     """Verify data in Qdrant step."""
 
     async def execute(self) -> None:
-        self.logger.info("🔍 Verifying entities in Qdrant")
+        self.logger.info("=" * 80)
+        self.logger.info("📋 VERIFICATION PHASE: Checking entities in vector database")
+        self.logger.info("=" * 80)
+
         client = self.context.airweave_client
+        entity_count = len(self.context.created_entities)
+
+        self.logger.info(f"🎯 Target: Verify {entity_count} entities were successfully synced")
+        self.logger.info(f"📦 Collection: {self.context.collection_readable_id}")
+        self.logger.info("🔍 Strategy: Search for unique tokens embedded in each test entity")
 
         async def verify_one(entity: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
             expected_token = entity.get("token")
@@ -340,11 +436,19 @@ class VerifyStep(TestStep):
                 )
                 expected_token = (entity.get("path") or "").split("/")[-1]
 
+            self.logger.info(
+                f"🔍 Verifying entity: {self._display_name(entity)} with token: {expected_token}"
+            )
+
             # Always use 1000 limit for comprehensive search
             ok = await _token_present_in_collection(
                 client, self.context.collection_readable_id, expected_token, 1000
             )
             return entity, ok
+
+        # Add a wait after sync completion to allow Qdrant indexing
+        self.logger.info("⏳ Waiting 10s for Qdrant indexing to complete...")
+        await asyncio.sleep(10)
 
         # Retry support + optional one-time rescue resync
         attempts = int(self.config.verification_config.get("retries", 5))
@@ -385,21 +489,39 @@ class VerifyStep(TestStep):
             *[verify_with_retries(e) for e in self.context.created_entities]
         )
 
+        # Generate detailed summary
         errors = []
+        verified_count = 0
         for entity, ok in results:
             if not ok:
                 errors.append(
                     f"Entity {self._display_name(entity)} not found in Qdrant"
                 )
             else:
+                verified_count += 1
                 self.logger.info(
-                    f"✅ Entity {self._display_name(entity)} verified in Qdrant"
+                    f"✅ [{verified_count}/{entity_count}] Entity {self._display_name(entity)} verified"
                 )
 
+        # Print narrative summary
+        self.logger.info("=" * 80)
         if errors:
+            self.logger.error(f"❌ VERIFICATION FAILED: {verified_count}/{entity_count} entities found")
+            self.logger.error(f"📊 Summary: {len(errors)} entity(ies) missing from vector database")
+            for error in errors:
+                self.logger.error(f"   • {error}")
+            self.logger.info("")
+            self.logger.info("🔍 TROUBLESHOOTING TIPS:")
+            self.logger.info("   1. Check if entities were created successfully in the source system")
+            self.logger.info("   2. Review backend sync logs to see if source API returned the entities")
+            self.logger.info("   3. Verify filter configurations aren't excluding test entities")
+            self.logger.info("   4. Ensure adequate wait time for source API indexing (post_create_sleep_seconds)")
+            self.logger.info("=" * 80)
             raise Exception("; ".join(errors))
-
-        self.logger.info("✅ All entities verified in Qdrant")
+        else:
+            self.logger.info(f"✅ VERIFICATION PASSED: All {entity_count}/{entity_count} entities found!")
+            self.logger.info("📊 Summary: Every test entity was successfully synced to the vector database")
+            self.logger.info("=" * 80)
 
 
 class UpdateStep(TestStep):
@@ -439,16 +561,21 @@ class PartialDeleteStep(TestStep):
         # (e.g., cascade deletions in ClickUp where deleting a task also deletes its children)
         # We need to update our tracking based on what was actually deleted
 
-        # Build a set of deleted IDs for fast lookup
-        deleted_ids = set(deleted_paths)
+        # Build a set of deleted identifiers for fast lookup
+        deleted_identifiers = set(deleted_paths)
 
         # Find all entities that were actually deleted (including cascade deletions)
-        actually_deleted = [
-            e for e in self.context.created_entities if e["id"] in deleted_ids
-        ]
-        actually_remaining = [
-            e for e in self.context.created_entities if e["id"] not in deleted_ids
-        ]
+        # Different bongos use different identifier fields (id vs path)
+        actually_deleted = []
+        actually_remaining = []
+
+        for e in self.context.created_entities:
+            # Check both 'id' and 'path' fields to support different bongo types
+            entity_identifier = e.get("id") or e.get("path")
+            if entity_identifier and entity_identifier in deleted_identifiers:
+                actually_deleted.append(e)
+            else:
+                actually_remaining.append(e)
 
         # Update context with actual results
         self.context.partially_deleted_entities = actually_deleted
@@ -498,9 +625,9 @@ class VerifyPartialDeletionStep(TestStep):
                 )
                 return entity, True  # Assume deleted if no token
 
-            # Check if token is present in collection
+            # Check if token is present in collection (expecting it to be absent/deleted)
             present = await _token_present_in_collection(
-                client, self.context.collection_readable_id, token, 1000
+                client, self.context.collection_readable_id, token, 1000, expect_present=False
             )
 
             return entity, (not present)
@@ -626,9 +753,9 @@ class VerifyCompleteDeletionStep(TestStep):
             if not expected_token:
                 return entity, False
 
-            # Always use 1000 limit for comprehensive search
+            # Always use 1000 limit for comprehensive search (expecting it to be absent/deleted)
             present = await _token_present_in_collection(
-                client, self.context.collection_readable_id, expected_token, 1000
+                client, self.context.collection_readable_id, expected_token, 1000, expect_present=False
             )
 
             if present:
@@ -755,34 +882,39 @@ class CollectionCleanupStep(TestStep):
         cleanup_stats = {"collections_deleted": 0, "errors": 0}
 
         try:
-            # Find all test collections
-            test_collections = await self._find_test_collections()
-
-            if test_collections:
+            # Only clean up collections that belong to this specific test
+            # This prevents race conditions where tests delete each other's collections
+            if (
+                hasattr(self.context, "collection_readable_id")
+                and self.context.collection_readable_id
+            ):
                 self.logger.info(
-                    f"🔍 Found {len(test_collections)} test collections to clean up"
+                    f"🔍 Cleaning up current test collection: {self.context.collection_readable_id}"
                 )
 
-                for collection in test_collections:
-                    try:
-                        response = http_utils.http_delete(
-                            f"/collections/{collection['readable_id']}"
+                try:
+                    response = http_utils.http_delete(
+                        f"/collections/{self.context.collection_readable_id}"
+                    )
+                    if response.status_code in [200, 204]:
+                        cleanup_stats["collections_deleted"] += 1
+                        self.logger.info(
+                            f"✅ Deleted collection: {self.context.collection_readable_id}"
                         )
-                        if response.status_code in [200, 204]:
-                            cleanup_stats["collections_deleted"] += 1
-                            self.logger.info(
-                                f"✅ Deleted collection: {collection['name']} ({collection['readable_id']})"
-                            )
-                        else:
-                            cleanup_stats["errors"] += 1
-                            self.logger.warning(
-                                f"⚠️ Failed to delete collection {collection['readable_id']}: {response.status_code}"
-                            )
-                    except Exception as e:
+                    elif response.status_code == 404:
+                        self.logger.info("ℹ️  Collection already deleted")
+                    else:
                         cleanup_stats["errors"] += 1
                         self.logger.warning(
-                            f"⚠️ Failed to delete collection {collection['readable_id']}: {e}"
+                            f"⚠️ Failed to delete collection {self.context.collection_readable_id}: {response.status_code}"
                         )
+                except Exception as e:
+                    cleanup_stats["errors"] += 1
+                    self.logger.warning(
+                        f"⚠️ Failed to delete collection {self.context.collection_readable_id}: {e}"
+                    )
+            else:
+                self.logger.info("ℹ️  No collection to clean up for this test")
 
             # Log cleanup summary
             self.logger.info(
@@ -794,37 +926,6 @@ class CollectionCleanupStep(TestStep):
             self.logger.error(f"❌ Error during collection cleanup: {e}")
             # Don't re-raise - cleanup should be best-effort
 
-    async def _find_test_collections(self) -> List[Dict[str, Any]]:
-        """Find all test collections that should be cleaned up."""
-        test_collections = []
-
-        try:
-            collections = http_utils.http_get("/collections")
-
-            # Handle both list and dict with items/results key
-            if isinstance(collections, dict):
-                collections = collections.get("items", collections.get("results", []))
-
-            for collection in collections:
-                name = collection.get("name", "")
-                readable_id = collection.get("readable_id", "")
-
-                # Check if this looks like a test collection
-                is_test_collection = (
-                    name.lower().startswith("monke-")
-                    or "test" in name.lower()
-                    and ("collection" in name.lower() or "monke" in name.lower())
-                    or readable_id.startswith("monke-")
-                )
-
-                if is_test_collection:
-                    test_collections.append(collection)
-
-        except Exception as e:
-            self.logger.error(f"❌ Error finding test collections: {e}")
-
-        return test_collections
-
 
 class TestStepFactory:
     """Factory for creating test steps."""
@@ -834,6 +935,7 @@ class TestStepFactory:
         "collection_cleanup": CollectionCleanupStep,
         "create": CreateStep,
         "sync": SyncStep,
+        "force_full_sync": SyncStep,  # Use same class with force_full_sync=True
         "verify": VerifyStep,
         "update": UpdateStep,
         "partial_delete": PartialDeleteStep,
@@ -848,4 +950,11 @@ class TestStepFactory:
     ) -> TestStep:
         if step_name not in self._steps:
             raise ValueError(f"Unknown test step: {step_name}")
-        return self._steps[step_name](config, context)
+
+        step_class = self._steps[step_name]
+
+        # Special handling for force_full_sync step
+        if step_name == "force_full_sync":
+            return step_class(config, context, force_full_sync=True)
+
+        return step_class(config, context)

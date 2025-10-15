@@ -29,8 +29,38 @@ class TestFlow:
 
     async def execute(self):
         """Execute the test flow."""
-        self.logger.info(f"🚀 Executing test flow: {self.config.name}")
-        self.logger.info(f"🔄 Test flow steps: {self.config.test_flow.steps}")
+        # Print narrative test flow summary
+        self.logger.info("=" * 80)
+        self.logger.info(f"🚀 TEST FLOW: {self.config.name}")
+        self.logger.info("=" * 80)
+        self.logger.info(f"📡 Connector: {self.config.connector.type}")
+        self.logger.info(f"📦 Test Entities: {self.config.entity_count}")
+        self.logger.info(f"🔄 Total Steps: {len(self.config.test_flow.steps)}")
+        self.logger.info("")
+        self.logger.info("📋 Test Flow Roadmap:")
+
+        # Show step-by-step roadmap
+        step_descriptions = {
+            "cleanup": "Clean up any leftover test data",
+            "create": "Create test entities in source system",
+            "sync": "Sync data from source to vector database",
+            "force_full_sync": "Force full sync (ignore cursor, fetch all entities)",
+            "verify": "Verify entities appear in vector database",
+            "update": "Update existing test entities",
+            "partial_delete": "Delete subset of test entities",
+            "verify_partial_deletion": "Verify deleted entities are removed",
+            "verify_remaining_entities": "Verify non-deleted entities still exist",
+            "complete_delete": "Delete all remaining test entities",
+            "verify_complete_deletion": "Verify all entities are removed",
+        }
+
+        for i, step in enumerate(self.config.test_flow.steps, 1):
+            description = step_descriptions.get(step, "Execute step")
+            self.logger.info(f"   {i}. {step:<25} → {description}")
+
+        self.logger.info("=" * 80)
+        self.logger.info("")
+
         await self._emit_event(
             "flow_started",
             extra={
@@ -43,11 +73,22 @@ class TestFlow:
 
         flow_start = time.time()
         try:
-            for step_name in self.config.test_flow.steps:
-                await self._execute_step(step_name)
+            for step_idx, step_name in enumerate(self.config.test_flow.steps, 1):
+                await self._execute_step(step_name, step_idx, len(self.config.test_flow.steps))
 
-            self.logger.info(f"✅ Test flow completed: {self.config.name}")
-            self.context.metrics["total_duration_wall_clock"] = time.time() - flow_start
+            total_duration = time.time() - flow_start
+            self.context.metrics["total_duration_wall_clock"] = total_duration
+
+            # Final summary
+            self.logger.info("")
+            self.logger.info("=" * 80)
+            self.logger.info(f"✅ TEST FLOW COMPLETED: {self.config.name}")
+            self.logger.info("=" * 80)
+            self.logger.info(f"⏱️  Total Duration: {total_duration:.2f}s")
+            self.logger.info(f"📊 Steps Executed: {len(self.config.test_flow.steps)}")
+            self.logger.info("🎯 Test Status: PASSED")
+            self.logger.info("=" * 80)
+
             await self._emit_event("flow_completed")
         except Exception as e:
             self.logger.error(f"❌ Test flow execution failed: {e}")
@@ -60,11 +101,19 @@ class TestFlow:
                 )
             raise
 
-    async def _execute_step(self, step_name: str):
+    async def _execute_step(self, step_name: str, step_idx: int = 0, total_steps: int = 0):
         """Execute a single test step."""
         self._step_idx += 1
         idx = self._step_idx
-        self.logger.info(f"🔄 Executing step: {step_name}")
+
+        # Show progress
+        if step_idx > 0 and total_steps > 0:
+            self.logger.info("")
+            self.logger.info(f"📍 PROGRESS: Step {step_idx}/{total_steps} - {step_name.upper()}")
+            self.logger.info("")
+        else:
+            self.logger.info(f"🔄 Executing step: {step_name}")
+
         await self._emit_event("step_started", extra={"step": step_name, "index": idx})
 
         # Pass both config and context to steps

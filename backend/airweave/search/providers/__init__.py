@@ -1,6 +1,7 @@
 """LLM provider implementations."""
 
 from ._base import BaseProvider
+from .cerebras import CerebrasProvider
 from .cohere import CohereProvider
 from .groq import GroqProvider
 from .openai import OpenAIProvider
@@ -17,6 +18,7 @@ __all__ = [
     "EmbeddingModelConfig",
     "RerankModelConfig",
     "ProviderModelSpec",
+    "CerebrasProvider",
     "CohereProvider",
     "GroqProvider",
     "OpenAIProvider",

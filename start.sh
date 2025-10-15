@@ -5,13 +5,14 @@ set -euo pipefail
 
 # ---- Optional flags/env (do not change default behavior) ---------------------
 NONINTERACTIVE="${NONINTERACTIVE:-}"
-CI_COMPOSE_OVERRIDE="${CI_COMPOSE_OVERRIDE:-}"
-COMPOSE_EXTRA_ARGS="${COMPOSE_EXTRA_ARGS:-}"
+SKIP_LOCAL_EMBEDDINGS="${SKIP_LOCAL_EMBEDDINGS:-}"  # Explicitly skip local embeddings
+SKIP_FRONTEND="${SKIP_FRONTEND:-}"  # Explicitly skip frontend
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --noninteractive) NONINTERACTIVE=1; shift ;;
-    --compose-override) CI_COMPOSE_OVERRIDE="$2"; shift 2 ;;
+    --skip-local-embeddings) SKIP_LOCAL_EMBEDDINGS=1; shift ;;
+    --skip-frontend) SKIP_FRONTEND=1; shift ;;
     *) echo "Unknown arg: $1"; exit 2 ;;
   esac
 done
@@ -173,12 +174,6 @@ if [ -n "$EXISTING_CONTAINERS" ]; then
   fi
 fi
 
-# Now run the appropriate Docker Compose command with optional override
-COMPOSE_FILES="-f docker/docker-compose.yml"
-if [ -n "${CI_COMPOSE_OVERRIDE:-}" ] && [ -f "$CI_COMPOSE_OVERRIDE" ]; then
-  COMPOSE_FILES="$COMPOSE_FILES -f $CI_COMPOSE_OVERRIDE"
-fi
-
 echo ""
 
 # Show which images will be used
@@ -189,8 +184,48 @@ if [ -n "${BACKEND_IMAGE:-}" ] || [ -n "${FRONTEND_IMAGE:-}" ]; then
     echo ""
 fi
 
+# Determine which optional services to start (default: all enabled for local dev)
+USE_LOCAL_EMBEDDINGS=true
+USE_FRONTEND=true
+
+# Check if OpenAI API key exists in .env - auto-skip local embeddings if present
+if [ -f .env ]; then
+    OPENAI_KEY=$(grep "^OPENAI_API_KEY=" .env 2>/dev/null | head -1 | cut -d'=' -f2- | tr -d '"' | tr -d ' ')
+    if [ -n "$OPENAI_KEY" ] && [ "$OPENAI_KEY" != "your-api-key-here" ]; then
+        echo "OpenAI API key detected - skipping local embeddings service (~2GB)"
+        USE_LOCAL_EMBEDDINGS=false
+    fi
+fi
+
+# Check for explicit skip flags (used in CI)
+if [ -n "$SKIP_LOCAL_EMBEDDINGS" ]; then
+    echo "SKIP_LOCAL_EMBEDDINGS is set - skipping local embeddings service"
+    USE_LOCAL_EMBEDDINGS=false
+fi
+
+if [ -n "$SKIP_FRONTEND" ]; then
+    echo "SKIP_FRONTEND is set - skipping frontend service"
+    USE_FRONTEND=false
+fi
+
+# Build compose command with profiles (default: enable both)
+COMPOSE_CMD_WITH_OPTS="$COMPOSE_CMD -f docker/docker-compose.yml"
+if [ "$USE_LOCAL_EMBEDDINGS" = true ]; then
+    echo "Starting with local embeddings service (text2vec-transformers)"
+    COMPOSE_CMD_WITH_OPTS="$COMPOSE_CMD_WITH_OPTS --profile local-embeddings"
+else
+    echo "Starting without local embeddings (backend will use OpenAI)"
+fi
+
+if [ "$USE_FRONTEND" = true ]; then
+    echo "Starting with frontend UI"
+    COMPOSE_CMD_WITH_OPTS="$COMPOSE_CMD_WITH_OPTS --profile frontend"
+else
+    echo "Starting without frontend (backend-only mode)"
+fi
+
 echo "Starting Docker services..."
-if ! $COMPOSE_CMD $COMPOSE_FILES up -d $COMPOSE_EXTRA_ARGS; then
+if ! $COMPOSE_CMD_WITH_OPTS up -d; then
     echo "❌ Failed to start Docker services"
     echo "Check the error messages above and try running:"
     echo "  docker logs airweave-backend"
@@ -230,12 +265,14 @@ if [ "$BACKEND_HEALTHY" = false ]; then
   echo "  - Platform sync errors"
 fi
 
-# Check if frontend needs to be started manually
-FRONTEND_STATUS=$(${CONTAINER_CMD} inspect airweave-frontend --format='{{.State.Status}}' 2>/dev/null || true)
-if [ "$FRONTEND_STATUS" = "created" ] || [ "$FRONTEND_STATUS" = "exited" ]; then
-  echo "Starting frontend container..."
-  ${CONTAINER_CMD} start airweave-frontend || true
-  sleep 5
+# Check if frontend needs to be started manually (only if we started it)
+if [ "$USE_FRONTEND" = true ]; then
+  FRONTEND_STATUS=$(${CONTAINER_CMD} inspect airweave-frontend --format='{{.State.Status}}' 2>/dev/null || true)
+  if [ "$FRONTEND_STATUS" = "created" ] || [ "$FRONTEND_STATUS" = "exited" ]; then
+    echo "Starting frontend container..."
+    ${CONTAINER_CMD} start airweave-frontend || true
+    sleep 5
+  fi
 fi
 
 # Final status check
@@ -253,11 +290,16 @@ else
   SERVICES_HEALTHY=false
 fi
 
-if curl -f http://localhost:8080 >/dev/null 2>&1; then
-  echo "✅ Frontend UI:    http://localhost:8080"
+# Only check frontend if we started it
+if [ "$USE_FRONTEND" = true ]; then
+  if curl -f http://localhost:8080 >/dev/null 2>&1; then
+    echo "✅ Frontend UI:    http://localhost:8080"
+  else
+    echo "❌ Frontend UI:    Not responding (check logs with: docker logs airweave-frontend)"
+    SERVICES_HEALTHY=false
+  fi
 else
-  echo "❌ Frontend UI:    Not responding (check logs with: docker logs airweave-frontend)"
-  SERVICES_HEALTHY=false
+  echo "⏭️  Frontend UI:    Skipped (backend-only mode)"
 fi
 
 echo ""
@@ -265,6 +307,12 @@ echo "Other services:"
 echo "📊 Temporal UI:    http://localhost:8088"
 echo "🗄️  PostgreSQL:    localhost:5432"
 echo "🔍 Qdrant:        http://localhost:6333"
+
+if [ "$USE_LOCAL_EMBEDDINGS" = true ]; then
+  echo "🤖 Embeddings:    http://localhost:9878 (local text2vec)"
+else
+  echo "🤖 Embeddings:    OpenAI API"
+fi
 echo ""
 echo "To view logs: docker logs <container-name>"
 echo "To stop all services: docker compose -f docker/docker-compose.yml down"

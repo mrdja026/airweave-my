@@ -1,5 +1,6 @@
 """Base provider for LLM operations."""
 
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -19,6 +20,46 @@ class BaseProvider(ABC):
         self.api_key = api_key
         self.model_spec = model_spec
         self.ctx = ctx
+
+    @staticmethod
+    def is_retryable_error(error: Exception) -> bool:
+        """Check if error should trigger provider fallback.
+
+        Retryable errors:
+        - Rate limiting (429)
+        - Server errors (500, 502, 503, 504)
+
+        Non-retryable errors:
+        - Authentication (401, 403)
+        - Validation errors (400, 422)
+        - Not found (404)
+
+        Args:
+            error: Exception to check
+
+        Returns:
+            True if error should trigger fallback to next provider
+        """
+        error_str = str(error).lower()
+
+        # Check for HTTP status codes and error patterns in error message
+        retryable_patterns = [
+            r"429",  # Rate limit
+            r"500",  # Internal server error
+            r"502",  # Bad gateway
+            r"503",  # Service unavailable
+            r"504",  # Gateway timeout
+            r"too[_\s]many[_\s]requests",
+            r"rate[_\s]limit",
+            r"queue[_\s]exceeded",
+            r"server[_\s]error",
+        ]
+
+        for pattern in retryable_patterns:
+            if re.search(pattern, error_str):
+                return True
+
+        return False
 
     def _load_tokenizer(self, tokenizer_name: str, model_type: str) -> Optional[Encoding]:
         """Load a tokenizer by name with consistent error handling."""

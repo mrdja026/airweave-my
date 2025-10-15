@@ -131,7 +131,7 @@ async def run_sync_activity(
                 # Propagate result/exception (including CancelledError from inner task)
                 await sync_task
                 break
-            ctx.logger.debug("\n\nHEARTBEAT: Sync in progress\n\n")
+            ctx.logger.debug("HEARTBEAT: Sync in progress")
             activity.heartbeat("Sync in progress")
 
         ctx.logger.info(f"\n\nCompleted sync activity for job {sync_job.id}\n\n")

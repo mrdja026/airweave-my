@@ -1478,14 +1478,44 @@ class SourceConnectionService:
         *,
         id: UUID,
         ctx: ApiContext,
+        force_full_sync: bool = False,
     ) -> schemas.SourceConnectionJob:
-        """Trigger a sync run for a source connection."""
+        """Trigger a sync run for a source connection.
+
+        Args:
+            db: Database session
+            id: Source connection ID
+            ctx: API context
+            force_full_sync: If True, forces a full sync with orphaned entity cleanup.
+                           Only allowed for continuous syncs (syncs with cursor data).
+                           Raises HTTPException if used on non-continuous syncs.
+        """
         source_conn = await crud.source_connection.get(db, id=id, ctx=ctx)
         if not source_conn:
             raise HTTPException(status_code=404, detail="Source connection not found")
 
         if not source_conn.sync_id:
             raise HTTPException(status_code=400, detail="Source connection has no associated sync")
+
+        # Validate force_full_sync is only used with continuous syncs
+        if force_full_sync:
+            # Check if sync has cursor data (indicates continuous sync)
+            cursor = await crud.sync_cursor.get_by_sync_id(db, sync_id=source_conn.sync_id, ctx=ctx)
+
+            if not cursor or not cursor.cursor_data:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "force_full_sync can only be used with continuous syncs "
+                        "(syncs with cursor data). This sync is non-continuous and "
+                        "always performs full syncs by default."
+                    ),
+                )
+
+            ctx.logger.info(
+                f"Force full sync requested for continuous sync {source_conn.sync_id}. "
+                "Will ignore cursor data and perform full sync with orphaned entity cleanup."
+            )
 
         # Get sync_dag for the workflow
         sync_dag = await crud.sync_dag.get_by_sync_id(db, sync_id=source_conn.sync_id, ctx=ctx)
@@ -1522,6 +1552,7 @@ class SourceConnectionService:
             collection=collection_schema,
             connection=connection_schema,  # Pass Connection, not SourceConnection
             ctx=ctx,
+            force_full_sync=force_full_sync,
         )
 
         # Convert sync_job to SourceConnectionJob using the built-in conversion method

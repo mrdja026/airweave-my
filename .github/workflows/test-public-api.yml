@@ -46,26 +46,23 @@ jobs:
       - name: Pre-pull heavy Docker images
         run: |
           echo "Pre-pulling Docker images in parallel..."
+          echo "Note: text2vec-transformers disabled via docker-compose profile (backend uses OpenAI)"
           docker pull postgres:16 &
           docker pull redis:7-alpine &
-          docker pull semitechnologies/transformers-inference:sentence-transformers-all-MiniLM-L6-v2 &
           docker pull qdrant/qdrant:latest &
           docker pull temporalio/auto-setup:1.24.2 &
           docker pull temporalio/ui:2.26.2 &
           wait
           echo "All images pre-pulled successfully"
 
-      - name: Build test images locally
+      - name: Build test backend image locally
         run: |
           echo "Building backend image for testing..."
           docker build -t test-backend:latest ./backend
-          echo "Building frontend image for testing..."
-          docker build -t test-frontend:latest ./frontend
 
       - name: Setup environment and start services
         env:
           BACKEND_IMAGE: test-backend:latest
-          FRONTEND_IMAGE: test-frontend:latest
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           STRIPE_API_KEY: ${{ secrets.STRIPE_API_KEY }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY || 'dummy-key' }}
@@ -74,35 +71,26 @@ jobs:
           CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY || 'dummy-key' }}
           # Required for start.sh to skip interactive prompts
           NONINTERACTIVE: "1"
+          # Skip services not needed for backend API tests
+          SKIP_LOCAL_EMBEDDINGS: "1"  # Use OpenAI embeddings (saves ~2GB)
+          SKIP_FRONTEND: "1"  # Backend-only testing (saves time)
           # Set required environment variables for the containers
           AUTH0_ENABLED: "false"
           DEV_MODE: "true"
         run: |
-          echo "Starting services using start.sh..."
-          # Prepare a Compose override to inject AI keys into containers without touching .env
-          cat > docker/compose.ci.env.yml <<'YAML'
-          services:
-            backend:
-              environment:
-                OPENAI_API_KEY: ${OPENAI_API_KEY}
-                STRIPE_API_KEY: ${STRIPE_API_KEY}
-                MISTRAL_API_KEY: ${MISTRAL_API_KEY}
-                COHERE_API_KEY: ${COHERE_API_KEY}
-                GROQ_API_KEY: ${GROQ_API_KEY}
-                CEREBRAS_API_KEY: ${CEREBRAS_API_KEY}
-            temporal-worker:
-              environment:
-                OPENAI_API_KEY: ${OPENAI_API_KEY}
-                STRIPE_API_KEY: ${STRIPE_API_KEY}
-                MISTRAL_API_KEY: ${MISTRAL_API_KEY}
-                COHERE_API_KEY: ${COHERE_API_KEY}
-                GROQ_API_KEY: ${GROQ_API_KEY}
-                CEREBRAS_API_KEY: ${CEREBRAS_API_KEY}
-          YAML
+          # Create .env from example
+          cp .env.example .env
 
-          # start.sh will create .env from .env.example and generate keys if missing
-          # We pass the override so containers receive secrets from the runner env
-          ./start.sh --noninteractive --compose-override docker/compose.ci.env.yml
+          # Add AI keys to .env before starting services
+          echo "OPENAI_API_KEY=$OPENAI_API_KEY" >> .env
+          echo "STRIPE_API_KEY=$STRIPE_API_KEY" >> .env
+          echo "MISTRAL_API_KEY=$MISTRAL_API_KEY" >> .env
+          echo "COHERE_API_KEY=$COHERE_API_KEY" >> .env
+          echo "GROQ_API_KEY=$GROQ_API_KEY" >> .env
+          echo "CEREBRAS_API_KEY=$CEREBRAS_API_KEY" >> .env
+
+          echo "Starting services using start.sh..."
+          ./start.sh --noninteractive
 
           # The script already does health checks, but let's verify
           echo ""
@@ -116,9 +104,7 @@ jobs:
           echo "Testing backend on port 8001..."
           curl -f http://localhost:8001/health || (echo "Backend not healthy"; docker logs airweave-backend; exit 1)
 
-          # Frontend runs on port 8080 according to start.sh
-          echo "Testing frontend on port 8080..."
-          curl -f http://localhost:8080 || (echo "Frontend not healthy"; docker logs airweave-frontend; exit 1)
+          echo "Backend is healthy and ready for API tests!"
 
       - name: Run E2E Smoke Tests
         env:

@@ -6,7 +6,7 @@ with vector database results using Reciprocal Rank Fusion (RRF).
 """
 
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -21,14 +21,15 @@ from ._base import SearchOperation
 class QueryKeywords(BaseModel):
     """Structured output schema for keyword extraction."""
 
-    keywords: List[str] = Field(
+    model_config = {"extra": "forbid"}
+
+    # Enforce exactly 5 keywords using a fixed-size tuple (Cerebras prefixItems)
+    keywords: Tuple[str, str, str, str, str] = Field(
         description=(
-            "Return 5-10 highly relevant keywords or short phrases. Include a mix of "
+            "Return EXACTLY 5 highly relevant keywords or short phrases. Include a mix of "
             "single words and 2-3 word phrases that best represent the shared intent. "
             "These will be used directly in search API queries."
-        ),
-        min_items=5,
-        max_items=10,
+        )
     )
 
 
@@ -45,25 +46,27 @@ class FederatedSearch(SearchOperation):
     # Rate limit delay between sequential queries (seconds)
     RATE_LIMIT_DELAY_SECONDS = 0.1
 
-    def __init__(self, sources: List[BaseSource], limit: int, provider: BaseProvider) -> None:
+    def __init__(
+        self, sources: List[BaseSource], limit: int, providers: List[BaseProvider]
+    ) -> None:
         """Initialize with list of federated sources.
 
         Args:
             sources: List of source instances that support federated search
             limit: Maximum results to request from each source
-            provider: LLM provider for keyword extraction (required)
+            providers: List of LLM providers for keyword extraction with fallback support
 
         Raises:
-            ValueError: If operation created without any sources or provider
+            ValueError: If operation created without any sources or providers
         """
         if not sources:
             raise ValueError(
                 "FederatedSearch operation requires at least one source. "
                 "This operation should only be created when federated sources exist."
             )
-        if not provider:
+        if not providers:
             raise ValueError(
-                "FederatedSearch operation requires a provider for keyword extraction."
+                "FederatedSearch operation requires at least one provider for keyword extraction."
             )
         if not limit:
             raise ValueError(
@@ -71,7 +74,7 @@ class FederatedSearch(SearchOperation):
             )
         self.sources = sources
         self.limit = limit
-        self.provider = provider
+        self.providers = providers
 
     def depends_on(self) -> List[str]:
         """Depends on Retrieval to have vector results for merging."""
@@ -260,23 +263,31 @@ class FederatedSearch(SearchOperation):
             )
 
         try:
-            result = await self.provider.structured_output(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Extract 8-10 important keywords or short phrases that capture "
-                            "the core search intent. Always include a mix of single-word "
-                            "keywords (e.g., 'incident', 'latency') AND 2-3 word phrases "
-                            "(e.g., 'deploy failure'). Optimize for search APIs: prioritize "
-                            "specific, searchable terms. If multiple query phrasings are "
-                            "provided, reflect the shared intent across all variations. "
-                            "Return concise tokens without quotes or punctuation."
-                        ),
-                    },
-                    {"role": "user", "content": queries_text},
-                ],
-                schema=QueryKeywords,
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract 8-10 important keywords or short phrases that capture "
+                        "the core search intent. Always include a mix of single-word "
+                        "keywords (e.g., 'incident', 'latency') AND 2-3 word phrases "
+                        "(e.g., 'deploy failure'). Optimize for search APIs: prioritize "
+                        "specific, searchable terms. If multiple query phrasings are "
+                        "provided, reflect the shared intent across all variations. "
+                        "Return concise tokens without quotes or punctuation."
+                    ),
+                },
+                {"role": "user", "content": queries_text},
+            ]
+
+            # Extract keywords with provider fallback
+            async def call_provider(provider: BaseProvider) -> BaseModel:
+                return await provider.structured_output(messages, QueryKeywords)
+
+            result = await self._execute_with_provider_fallback(
+                providers=self.providers,
+                operation_call=call_provider,
+                operation_name="FederatedSearch",
+                ctx=ctx,
             )
 
             # Normalize and ensure single-word coverage

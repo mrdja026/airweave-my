@@ -25,72 +25,176 @@ class OutlookMailBongo(BaseBongo):
         self._last_req = 0.0
 
     async def create_entities(self) -> List[Dict[str, Any]]:
-        self.logger.info(f"🥁 Creating {self.entity_count} Outlook draft messages")
+        """Create test emails in Outlook by sending to oneself."""
+        self.logger.info(f"🥁 Creating {self.entity_count} test emails in Outlook")
         out: List[Dict[str, Any]] = []
+
         async with httpx.AsyncClient(base_url=GRAPH, timeout=30) as client:
-            for _ in range(self.entity_count):
+            # Get user's email address
+            user_email = await self._get_user_email(client)
+            self.logger.info(f"📧 Sending test emails to: {user_email}")
+
+            # Generate tokens
+            tokens = [uuid.uuid4().hex[:8] for _ in range(self.entity_count)]
+
+            # Generate and send emails
+            for token in tokens:
                 await self._pace()
-                token = uuid.uuid4().hex[:8]
-                msg = await generate_outlook_message(self.openai_model, token)
+
+                # Generate email content
+                subject, body = await generate_outlook_message(self.openai_model, token)
+
+                # Create and send email to oneself
                 payload = {
-                    "subject": msg.subject,
-                    "body": {"contentType": "HTML", "content": msg.body_html},
-                    "toRecipients": [{"emailAddress": {"address": a}} for a in msg.to],
+                    "message": {
+                        "subject": subject,
+                        "body": {"contentType": "Text", "content": body},
+                        "toRecipients": [{"emailAddress": {"address": user_email}}],
+                    },
+                    "saveToSentItems": "true",
                 }
+
                 r = await client.post(
-                    "/me/messages", headers=self._hdrs(), json=payload
-                )  # create DRAFT
-                if r.status_code not in (200, 201):
-                    self.logger.error(f"Draft create failed {r.status_code}: {r.text}")
-                r.raise_for_status()
-                data = r.json()
+                    "/me/sendMail", headers=self._hdrs(), json=payload
+                )
+
+                if r.status_code not in (200, 202):
+                    self.logger.error(f"Send mail failed {r.status_code}: {r.text}")
+                    r.raise_for_status()
+
+                # Note: sendMail doesn't return the message ID, so we'll use token as reference
                 ent = {
                     "type": "message",
-                    "id": data["id"],
-                    "name": msg.subject,
+                    "id": token,  # Use token as ID for tracking
+                    "subject": subject,
                     "token": token,
                     "expected_content": token,
-                    "path": f"graph/messages/{data['id']}",
+                    "user_email": user_email,
                 }
                 out.append(ent)
                 self._messages.append(ent)
-                self.created_entities.append({"id": data["id"], "name": msg.subject})
+                self.created_entities.append({"id": token, "name": subject})
+                self.logger.info(f"📧 Sent test email with token: {token}")
+
+                # Brief delay between sends
+                if self.entity_count > 10:
+                    await asyncio.sleep(0.5)
+
         return out
 
     async def update_entities(self) -> List[Dict[str, Any]]:
+        """Update entities by sending new emails with updated content.
+
+        Note: Sent emails cannot be edited, so we send new ones with [Updated] suffix.
+        """
         if not self._messages:
             return []
-        self.logger.info("🥁 Updating some drafts (append '[updated]' to subject)")
+
+        self.logger.info(f"🥁 Sending {len(self._messages)} updated emails")
+        updated = []
+
         async with httpx.AsyncClient(base_url=GRAPH, timeout=30) as client:
-            updated = []
-            for ent in self._messages[: min(3, len(self._messages))]:
+            user_email = await self._get_user_email(client)
+
+            for ent in self._messages[:min(3, len(self._messages))]:
                 await self._pace()
-                r = await client.patch(
-                    f"/me/messages/{ent['id']}",
-                    headers=self._hdrs(),
-                    json={"subject": ent["name"] + " [updated]"},
+
+                # Generate updated content with same token
+                subject, body = await generate_outlook_message(
+                    self.openai_model, ent["token"], is_update=True
                 )
-                r.raise_for_status()
-                updated.append({**ent, "updated": True})
-            return updated
+                subject = f"{subject} [Updated]"
+
+                # Send updated email
+                payload = {
+                    "message": {
+                        "subject": subject,
+                        "body": {"contentType": "Text", "content": body},
+                        "toRecipients": [{"emailAddress": {"address": user_email}}],
+                    },
+                    "saveToSentItems": "true",
+                }
+
+                r = await client.post("/me/sendMail", headers=self._hdrs(), json=payload)
+
+                if r.status_code in (200, 202):
+                    updated.append({**ent, "updated": True, "updated_subject": subject})
+                    self.logger.info(f"📧 Sent updated email for token: {ent['token']}")
+                else:
+                    self.logger.warning(f"Failed to send updated email: {r.status_code}")
+
+        return updated
 
     async def delete_entities(self) -> List[str]:
         return await self.delete_specific_entities(self._messages)
 
     async def delete_specific_entities(self, entities: List[Dict[str, Any]]) -> List[str]:
-        self.logger.info(f"🥁 Deleting {len(entities)} Outlook drafts")
+        """Delete specific entities by searching for them by token."""
+        self.logger.info(f"🥁 Deleting {len(entities)} Outlook emails")
         deleted: List[str] = []
+
         async with httpx.AsyncClient(base_url=GRAPH, timeout=30) as client:
             for ent in entities:
                 try:
                     await self._pace()
-                    r = await client.delete(f"/me/messages/{ent['id']}", headers=self._hdrs())
-                    if r.status_code == 204:
-                        deleted.append(ent["id"])
+
+                    # Get the token to search for
+                    token = ent.get("token", "")
+                    if not token:
+                        self.logger.warning(f"No token for entity, skipping: {ent}")
+                        continue
+
+                    # Use $search for full-text search across subject and body
+                    # This is more flexible than $filter for finding tokens
+                    r = await client.get(
+                        "/me/messages",
+                        headers=self._hdrs(),
+                        params={"$search": f'"{token}"', "$top": 50},
+                    )
+
+                    if r.status_code == 200:
+                        messages = r.json().get("value", [])
+                        self.logger.info(f"🔍 Found {len(messages)} messages matching token '{token}'")
+
+                        # Filter messages that actually contain the token
+                        # (search can be imprecise, so verify)
+                        matching_messages = []
+                        for msg in messages:
+                            subject = msg.get("subject", "")
+                            body_preview = msg.get("bodyPreview", "")
+                            if token in subject or token in body_preview:
+                                matching_messages.append(msg)
+
+                        self.logger.info(
+                            f"🎯 {len(matching_messages)} messages verified to contain token '{token}'"
+                        )
+
+                        # Delete all matching messages
+                        for msg in matching_messages:
+                            try:
+                                await self._pace()
+                                del_r = await client.delete(
+                                    f"/me/messages/{msg['id']}", headers=self._hdrs()
+                                )
+                                if del_r.status_code == 204:
+                                    deleted.append(token)
+                                    self.logger.info(
+                                        f"✅ Deleted email: {msg.get('subject', 'Unknown')[:50]}"
+                                    )
+                                else:
+                                    self.logger.warning(
+                                        f"Delete failed for {msg['id']}: {del_r.status_code}"
+                                    )
+                            except Exception as e:
+                                self.logger.warning(f"Error deleting message {msg['id']}: {e}")
                     else:
-                        self.logger.warning(f"Delete {ent['id']} -> {r.status_code}: {r.text}")
+                        self.logger.warning(
+                            f"Search failed for token {token}: {r.status_code} - {r.text[:200]}"
+                        )
+
                 except Exception as e:
-                    self.logger.warning(f"Delete error {ent['id']}: {e}")
+                    self.logger.warning(f"Delete error for entity {ent.get('token', 'unknown')}: {e}")
+
         return deleted
 
     async def cleanup(self):
@@ -121,47 +225,72 @@ class OutlookMailBongo(BaseBongo):
         """Find and delete orphaned test messages from previous runs."""
         try:
             async with httpx.AsyncClient(base_url=GRAPH, timeout=30) as client:
-                # Search for messages with monke test patterns
-                filter_query = "startswith(subject, 'Test') or contains(subject, 'monke')"
-                r = await client.get(
-                    "/me/messages",
-                    headers=self._hdrs(),
-                    params={"$filter": filter_query, "$top": 100},
-                )
+                # Use $search for full-text search to find test messages
+                # Search for common patterns in our generated content
+                search_terms = ["product", "reference:", "synthetic"]
 
-                if r.status_code == 200:
-                    messages = r.json().get("value", [])
-                    test_messages = [
-                        m
-                        for m in messages
-                        if any(
-                            pattern in m.get("subject", "").lower()
-                            for pattern in ["test", "monke", "demo", "sample"]
-                        )
-                    ]
+                for term in search_terms:
+                    try:
+                        await self._pace()
+                        r = await client.get(
+                            "/me/messages",
+                            headers=self._hdrs(),
+                            params={"$search": f'"{term}"', "$top": 100},
+                        )\
 
-                    if test_messages:
-                        self.logger.info(
-                            f"🔍 Found {len(test_messages)} potential test messages to clean"
-                        )
-                        for msg in test_messages:
-                            try:
-                                await self._pace()
-                                del_r = await client.delete(
-                                    f"/me/messages/{msg['id']}", headers=self._hdrs()
-                                )
-                                if del_r.status_code == 204:
-                                    stats["messages_deleted"] += 1
-                                    self.logger.info(
-                                        f"✅ Deleted orphaned message: {msg.get('subject')}"
+                        if r.status_code == 200:
+                            messages = r.json().get("value", [])
+
+                            # Filter for messages that look like test emails
+                            test_patterns = ["product", "tech", "reference:", "synthetic"]
+                            test_messages = [
+                                m
+                                for m in messages
+                                if any(
+                                    pattern in m.get("subject", "").lower()
+                                    or (
+                                        m.get("bodyPreview")
+                                        and pattern in m.get("bodyPreview", "").lower()
                                     )
-                                else:
-                                    stats["errors"] += 1
-                            except Exception as e:
-                                stats["errors"] += 1
-                                self.logger.warning(f"⚠️ Failed to delete message {msg['id']}: {e}")
+                                    for pattern in test_patterns
+                                )
+                            ]
+
+                            if test_messages:
+                                self.logger.info(
+                                    f"🔍 Found {len(test_messages)} potential test messages "
+                                    f"(search term: {term})"
+                                )
+                                for msg in test_messages:
+                                    try:
+                                        await self._pace()
+                                        del_r = await client.delete(
+                                            f"/me/messages/{msg['id']}", headers=self._hdrs()
+                                        )
+                                        if del_r.status_code == 204:
+                                            stats["messages_deleted"] += 1
+                                            self.logger.info(
+                                                f"✅ Deleted orphaned message: "
+                                                f"{msg.get('subject', 'Unknown')[:50]}"
+                                            )
+                                        else:
+                                            stats["errors"] += 1
+                                    except Exception as e:
+                                        stats["errors"] += 1
+                                        self.logger.warning(
+                                            f"⚠️ Failed to delete message {msg['id']}: {e}"
+                                        )
+                    except Exception as e:
+                        self.logger.warning(f"⚠️ Search failed for term '{term}': {e}")
         except Exception as e:
             self.logger.warning(f"⚠️ Could not search for orphaned messages: {e}")
+
+    async def _get_user_email(self, client: httpx.AsyncClient) -> str:
+        """Get the authenticated user's email address."""
+        r = await client.get("/me", headers=self._hdrs())
+        r.raise_for_status()
+        data = r.json()
+        return data.get("mail") or data.get("userPrincipalName")
 
     def _hdrs(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json"}

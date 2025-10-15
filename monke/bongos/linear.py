@@ -16,13 +16,19 @@ class LinearBongo(BaseBongo):
 
     def __init__(self, credentials: Dict[str, Any], **kwargs):
         super().__init__(credentials)
-        self.access_token: str = credentials["access_token"]  # Personal API key or OAuth token
+        self._credentials = credentials  # Store for token refresh
+        self.access_token: str = credentials[
+            "access_token"
+        ]  # Personal API key or OAuth token
         self.entity_count: int = int(kwargs.get("entity_count", 3))
         self.openai_model: str = kwargs.get("openai_model", "gpt-4.1-mini")
         self.rate_limit_delay = float(kwargs.get("rate_limit_delay_ms", 500)) / 1000.0
         self.logger = get_logger("linear_bongo")
         self._issues: List[Dict[str, Any]] = []
         self._last_req = 0.0
+        
+        # Store Composio config for token refresh if available
+        self._composio_config = kwargs.get("composio_config")
 
     async def create_entities(self) -> List[Dict[str, Any]]:
         self.logger.info(f"🥁 Creating {self.entity_count} Linear issues")
@@ -61,7 +67,9 @@ class LinearBongo(BaseBongo):
                 }
                 out.append(ent)
                 self._issues.append(ent)
-                self.created_entities.append({"id": issue["id"], "name": issue["title"]})
+                self.created_entities.append(
+                    {"id": issue["id"], "name": issue["title"]}
+                )
 
                 # add 1-2 comments (best effort)
                 for c in data.content.comments[:2]:
@@ -70,7 +78,9 @@ class LinearBongo(BaseBongo):
                     mutation CommentCreate($input: CommentCreateInput!) {
                       commentCreate(input: $input) { success comment { id } }
                     }"""
-                    _ = await self._gql(client, qc, {"input": {"issueId": issue["id"], "body": c}})
+                    _ = await self._gql(
+                        client, qc, {"input": {"issueId": issue["id"], "body": c}}
+                    )
             return out
 
     async def update_entities(self) -> List[Dict[str, Any]]:
@@ -86,7 +96,9 @@ class LinearBongo(BaseBongo):
                   issueUpdate(id: $id, input: $input) { success issue { id title } }
                 }"""
                 resp = await self._gql(
-                    client, q, {"id": ent["id"], "input": {"title": ent["name"] + " [updated]"}}
+                    client,
+                    q,
+                    {"id": ent["id"], "input": {"title": ent["name"] + " [updated]"}},
                 )
                 updated.append({**ent, "updated": True})
             return updated
@@ -94,7 +106,9 @@ class LinearBongo(BaseBongo):
     async def delete_entities(self) -> List[str]:
         return await self.delete_specific_entities(self._issues)
 
-    async def delete_specific_entities(self, entities: List[Dict[str, Any]]) -> List[str]:
+    async def delete_specific_entities(
+        self, entities: List[Dict[str, Any]]
+    ) -> List[str]:
         self.logger.info(f"🥁 Deleting/archiving {len(entities)} Linear issues")
         deleted: List[str] = []
         async with httpx.AsyncClient(timeout=30) as client:
@@ -117,7 +131,9 @@ class LinearBongo(BaseBongo):
         try:
             # First, delete current session issues
             if self._issues:
-                self.logger.info(f"🗑️ Cleaning up {len(self._issues)} current session issues")
+                self.logger.info(
+                    f"🗑️ Cleaning up {len(self._issues)} current session issues"
+                )
                 deleted = await self.delete_specific_entities(self._issues)
                 cleanup_stats["issues_deleted"] += len(deleted)
                 self._issues.clear()
@@ -135,7 +151,9 @@ class LinearBongo(BaseBongo):
     async def _cleanup_orphaned_test_issues(self, stats: Dict[str, Any]):
         """Find and delete orphaned test issues from previous runs."""
         try:
-            async with httpx.AsyncClient(base_url="https://api.linear.app", timeout=30) as client:
+            async with httpx.AsyncClient(
+                base_url="https://api.linear.app", timeout=30
+            ) as client:
                 # Search for issues with test patterns in title
                 query = """query {
                     issues(filter: {
@@ -150,7 +168,9 @@ class LinearBongo(BaseBongo):
                 }"""
 
                 resp = await self._gql(client, query, {})
-                issues = ((resp.get("data") or {}).get("issues") or {}).get("nodes") or []
+                issues = ((resp.get("data") or {}).get("issues") or {}).get(
+                    "nodes"
+                ) or []
 
                 # Filter for actual test issues
                 test_issues = [
@@ -163,21 +183,33 @@ class LinearBongo(BaseBongo):
                 ]
 
                 if test_issues:
-                    self.logger.info(f"🔍 Found {len(test_issues)} potential test issues to clean")
+                    self.logger.info(
+                        f"🔍 Found {len(test_issues)} potential test issues to clean"
+                    )
                     for issue in test_issues:
                         try:
                             await self._pace()
                             mutation = "mutation($id: String!) { issueDelete(id: $id) { success } }"
-                            result = await self._gql(client, mutation, {"id": issue["id"]})
+                            result = await self._gql(
+                                client, mutation, {"id": issue["id"]}
+                            )
 
-                            if result.get("data", {}).get("issueDelete", {}).get("success"):
+                            if (
+                                result.get("data", {})
+                                .get("issueDelete", {})
+                                .get("success")
+                            ):
                                 stats["issues_deleted"] += 1
-                                self.logger.info(f"✅ Deleted orphaned issue: {issue.get('title')}")
+                                self.logger.info(
+                                    f"✅ Deleted orphaned issue: {issue.get('title')}"
+                                )
                             else:
                                 stats["errors"] += 1
                         except Exception as e:
                             stats["errors"] += 1
-                            self.logger.warning(f"⚠️ Failed to delete issue {issue['id']}: {e}")
+                            self.logger.warning(
+                                f"⚠️ Failed to delete issue {issue['id']}: {e}"
+                            )
         except Exception as e:
             self.logger.warning(f"⚠️ Could not search for orphaned issues: {e}")
 
@@ -189,14 +221,57 @@ class LinearBongo(BaseBongo):
             raise RuntimeError("No Linear teams available for API key")
         return nodes[0]["id"]
 
+    async def _refresh_token(self):
+        """Refresh the access token from Composio."""
+        try:
+            from monke.auth.broker import ComposioBroker
+
+            self.logger.info("🔄 Refreshing Linear access token...")
+            
+            if self._composio_config:
+                # Use the specific Composio configuration for this connector
+                broker = ComposioBroker(
+                    account_id=self._composio_config["account_id"],
+                    auth_config_id=self._composio_config["auth_config_id"],
+                )
+                fresh_creds = await broker.get_credentials("linear")
+            else:
+                # Fallback to generic credentials resolver
+                from monke.auth.credentials_resolver import resolve_credentials
+                fresh_creds = await resolve_credentials("linear", self._credentials)
+            
+            self.access_token = fresh_creds["access_token"]
+            self.logger.info("✅ Linear access token refreshed")
+        except Exception as e:
+            self.logger.error(f"❌ Failed to refresh Linear token: {e}")
+            raise
+
     async def _gql(
         self, client: httpx.AsyncClient, query: str, variables: Dict[str, Any]
     ) -> Dict[str, Any]:
         r = await client.post(
             LINEAR_GQL,
-            headers={"Content-Type": "application/json", "Authorization": self.access_token},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": self.access_token,
+            },
             json={"query": query, "variables": variables},
         )
+
+        # Handle 401 authentication errors by refreshing token and retrying
+        if r.status_code == 401:
+            self.logger.warning("🔑 Linear token expired, refreshing...")
+            await self._refresh_token()
+            # Retry with fresh token
+            r = await client.post(
+                LINEAR_GQL,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": self.access_token,
+                },
+                json={"query": query, "variables": variables},
+            )
+
         if r.status_code != 200:
             raise RuntimeError(f"Linear GraphQL error {r.status_code}: {r.text}")
         return r.json()

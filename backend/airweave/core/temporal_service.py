@@ -24,6 +24,7 @@ class TemporalService:
         connection: schemas.Connection,  # Connection, NOT SourceConnection
         ctx: ApiContext,
         access_token: Optional[str] = None,
+        force_full_sync: bool = False,
     ) -> WorkflowHandle:
         """Start a source connection sync workflow.
 
@@ -35,6 +36,7 @@ class TemporalService:
             connection: The connection (Connection schema, NOT SourceConnection)
             ctx: The API context
             access_token: Optional access token
+            force_full_sync: If True, forces a full sync with orphaned entity cleanup
 
         Returns:
             The workflow handle
@@ -47,6 +49,8 @@ class TemporalService:
 
         ctx.logger.info(f"Starting Temporal workflow {workflow_id} for sync job {sync_job.id}")
         ctx.logger.info(f"Connection: {connection.name} | Collection: {collection.name}")
+        if force_full_sync:
+            ctx.logger.info("🔄 Force full sync enabled - will ignore cursor data")
 
         # Convert Pydantic models to dicts for JSON serialization
         handle = await client.start_workflow(
@@ -59,6 +63,7 @@ class TemporalService:
                 connection.model_dump(mode="json"),
                 ctx.to_serializable_dict(),  # Use serializable dict instead of model_dump
                 access_token,
+                force_full_sync,
             ],
             id=workflow_id,
             task_queue=task_queue,
