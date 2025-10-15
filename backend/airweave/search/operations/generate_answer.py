@@ -18,8 +18,9 @@ from ._base import SearchOperation
 class GenerateAnswer(SearchOperation):
     """Generate AI completion from search results."""
 
-    MAX_COMPLETION_TOKENS = 10000
-    SAFETY_TOKENS = 2000
+    # Conservative defaults to support smaller local models (e.g., Ollama 8k ctx)
+    MAX_COMPLETION_TOKENS = 1024
+    SAFETY_TOKENS = 256
 
     def __init__(self, providers: List[BaseProvider]) -> None:
         """Initialize with list of LLM providers in preference order.

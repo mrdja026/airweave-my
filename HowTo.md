@@ -28,7 +28,7 @@ One‑Time Setup
 
 Start Services (Dashboard + API)
 Preferred: start.sh with WSL override and local images
-- BACKEND_IMAGE=airweave-backend:local FRONTEND_IMAGE=airweave-frontend:local ./start.sh --compose-override docker/wsl-host-postgres.override.yml
+- BACKEND_IMAGE=airweave-backend:local FRONTEND_IMAGE=airweave-frontend:local ./start.sh --wsl-override
 
 Alternative: start via docker compose directly
 - export BACKEND_IMAGE=airweave-backend:local
@@ -45,6 +45,27 @@ Verify Services
 - API health: curl -sSf http://localhost:8001/health
 - UI: http://localhost:8080
 - Swagger: http://localhost:8001/docs
+
+start.sh flags you can use
+- `--wsl-override`: include `docker/wsl-host-postgres.override.yml` automatically (routes backend to WSL Postgres on 5432, sets extra_hosts, enables Temporal).
+- `--skip-local-embeddings`: do not start the `text2vec-transformers` service.
+- `--skip-frontend`: start backend only (no UI).
+- `--noninteractive`: skip interactive prompts for API keys.
+- `--backend-only`: same as `--skip-frontend` (backend + dependencies only).
+- `--frontend-only`: start frontend (and backend) but skip local embeddings for a lighter startup.
+- `--with-local-embeddings`: force local embeddings ON even if `OPENAI_API_KEY` is set.
+
+Enable Local Embeddings (for offline neural/hybrid search)
+- Start the local transformers inference container (384‑dim MiniLM) so search can embed queries without cloud keys:
+  - docker compose -f docker/docker-compose.yml -f docker/wsl-host-postgres.override.yml --profile local-embeddings up -d text2vec-transformers
+- TEXT2VEC_INFERENCE_URL is already set to http://localhost:9878 in .env; backend will use it.
+
+Use Ollama For Answers (optional, fully local RAG)
+- Ensure Ollama runs on Windows host (e.g., http://localhost:11434) and your model is pulled (e.g., gemma:7b).
+- In .env, set:
+  - OLLAMA_BASE_URL=http://host.docker.internal:11434
+  - OLLAMA_MODEL=gemma:7b
+- The backend will prefer Ollama for answer generation when present. Expansion/Interpretation/Rerank remain off by default for offline mode.
 
 Index Your Existing Postgres (as a Source)
 Using the UI
@@ -84,10 +105,10 @@ Using the API (optional)
            }
          }'
 
-3) Search the collection
+3) Search the collection (offline-friendly config)
    - curl -sS -X POST http://localhost:8001/collections/READABLE/search \
      -H "Content-Type: application/json" \
-     -d '{"query":"hello"}'
+     -d '{"query":"hello", "retrieval_strategy":"hybrid", "generate_answer": true, "expand_query": false, "interpret_filters": false, "rerank": false}'
 
 Re‑enable Temporal (optional, later)
 - docker compose -f docker/docker-compose.yml -f docker/wsl-host-postgres.override.yml --profile temporal up -d
@@ -137,7 +158,7 @@ Startup with Temporal (final working flow)
 - Ensure internal DB exists on WSL Postgres:
   - `psql -U postgres -h localhost -p 5432 -d postgres -c "CREATE DATABASE airweave OWNER postgres;"`
 - Start services with the WSL override (Temporal auto-starts):
-  - `BACKEND_IMAGE=airweave-backend:local FRONTEND_IMAGE=airweave-frontend:local ./start.sh --compose-override docker/wsl-host-postgres.override.yml`
+  - `BACKEND_IMAGE=airweave-backend:local FRONTEND_IMAGE=airweave-frontend:local ./start.sh --wsl-override`
 - Verify:
   - API: `http://localhost:8001/health`
   - UI: `http://localhost:8080`
@@ -154,13 +175,14 @@ Add the external Postgres source (UI)
 - Keep the schedule if you want periodic runs. Click Run to trigger via Temporal.
 
 Smoke test (API)
-- Search: `curl -sS -X POST http://localhost:8001/collections/<readable_id>/search -H 'Content-Type: application/json' -d '{"query":"hello"}'`
+- Search: `curl -sS -X POST http://localhost:8001/collections/<readable_id>/search -H 'Content-Type: application/json' -d '{"query":"hello", "retrieval_strategy":"hybrid", "generate_answer": true, "expand_query": false, "interpret_filters": false, "rerank": false}'`
 
 Reminders for future you
 - If source creation fails with a DNS/Temporal error in UI, ensure Temporal is enabled and reachable (compose starts `temporal` + `temporal-ui` + worker; `TEMPORAL_HOST=temporal`).
 - If DB connect fails: replace `host.docker.internal` with the WSL eth0 IP in the source form.
 - If 5432 binds conflict: confirm the bundled Postgres is on `5433:5432` (override) and that you started with the override.
 - If GHCR pulls fail: always build/run local images as shown above.
+ - If search complains about providers/keys: ensure the `text2vec-transformers` container is running (for embeddings) and, if using answers, that `OLLAMA_BASE_URL` points to your host and the model exists.
 
 Security Notes
 - Do not commit real passwords to version control. .env is for local dev only; rotate credentials later.

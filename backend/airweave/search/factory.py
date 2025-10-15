@@ -326,12 +326,20 @@ class SearchFactory:
         )
 
     def _get_available_api_keys(self) -> Dict[str, Optional[str]]:
-        """Get available API keys from settings."""
+        """Get available providers based on configured credentials/endpoints.
+
+        For cloud providers, presence of API key enables the provider.
+        For local providers, presence of base URLs enables the provider.
+        """
         return {
             "cerebras": getattr(settings, "CEREBRAS_API_KEY", None),
             "groq": getattr(settings, "GROQ_API_KEY", None),
             "openai": getattr(settings, "OPENAI_API_KEY", None),
             "cohere": getattr(settings, "COHERE_API_KEY", None),
+            # Local embedding provider
+            "local": getattr(settings, "TEXT2VEC_INFERENCE_URL", None),
+            # Local LLM provider via Ollama
+            "ollama": getattr(settings, "OLLAMA_BASE_URL", None),
         }
 
     def _create_provider_for_each_operation(
@@ -553,6 +561,24 @@ class SearchFactory:
                         f"[Factory] Attempting to initialize CohereProvider for {operation_name}"
                     )
                     provider = CohereProvider(api_key=api_key, model_spec=model_spec, ctx=ctx)
+                elif provider_name == "local":
+                    ctx.logger.debug(
+                        f"[Factory] Attempting to initialize LocalText2VecProvider for {operation_name}"
+                    )
+                    from airweave.search.providers import LocalText2VecProvider
+
+                    provider = LocalText2VecProvider(
+                        api_key=api_key or "local", model_spec=model_spec, ctx=ctx
+                    )
+                elif provider_name == "ollama":
+                    ctx.logger.debug(
+                        f"[Factory] Attempting to initialize OllamaProvider for {operation_name}"
+                    )
+                    from airweave.search.providers import OllamaProvider
+
+                    provider = OllamaProvider(
+                        api_key=api_key or "ollama", model_spec=model_spec, ctx=ctx
+                    )
 
                 if provider:
                     initialized_providers.append(provider)

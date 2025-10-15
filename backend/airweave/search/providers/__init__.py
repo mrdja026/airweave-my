@@ -5,6 +5,8 @@ from .cerebras import CerebrasProvider
 from .cohere import CohereProvider
 from .groq import GroqProvider
 from .openai import OpenAIProvider
+from .local_text2vec import LocalText2VecProvider
+from .ollama import OllamaProvider
 from .schemas import (
     EmbeddingModelConfig,
     LLMModelConfig,
@@ -22,4 +24,6 @@ __all__ = [
     "CohereProvider",
     "GroqProvider",
     "OpenAIProvider",
+    "LocalText2VecProvider",
+    "OllamaProvider",
 ]

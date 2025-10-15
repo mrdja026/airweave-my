@@ -100,11 +100,12 @@ export const SearchBox: React.FC<SearchBoxProps> = ({
 
     // Toggle buttons state
     const [toggles, setToggles] = useState<SearchToggles>({
-        queryExpansion: true,
+        // Offline-friendly defaults: keep LLM features off unless configured
+        queryExpansion: false,
         filter: false,
         queryInterpretation: false,
         recencyBias: false,
-        reRanking: true,
+        reRanking: false,
         answer: true
     });
 

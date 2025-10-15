@@ -7,12 +7,20 @@ set -euo pipefail
 NONINTERACTIVE="${NONINTERACTIVE:-}"
 SKIP_LOCAL_EMBEDDINGS="${SKIP_LOCAL_EMBEDDINGS:-}"  # Explicitly skip local embeddings
 SKIP_FRONTEND="${SKIP_FRONTEND:-}"  # Explicitly skip frontend
+WSL_OVERRIDE="${WSL_OVERRIDE:-}"   # Use WSL host-postgres override compose file
+FRONTEND_ONLY="${FRONTEND_ONLY:-}"  # Convenience: start frontend (and backend), skip embeddings
+BACKEND_ONLY="${BACKEND_ONLY:-}"    # Convenience: start backend only (no frontend)
+WITH_LOCAL_EMBEDDINGS="${WITH_LOCAL_EMBEDDINGS:-}"  # Force-enable local embeddings regardless of OPENAI key
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --noninteractive) NONINTERACTIVE=1; shift ;;
     --skip-local-embeddings) SKIP_LOCAL_EMBEDDINGS=1; shift ;;
     --skip-frontend) SKIP_FRONTEND=1; shift ;;
+    --wsl-override) WSL_OVERRIDE=1; shift ;;
+    --frontend-only) FRONTEND_ONLY=1; shift ;;
+    --backend-only) BACKEND_ONLY=1; shift ;;
+    --with-local-embeddings) WITH_LOCAL_EMBEDDINGS=1; shift ;;
     *) echo "Unknown arg: $1"; exit 2 ;;
   esac
 done
@@ -203,13 +211,32 @@ if [ -n "$SKIP_LOCAL_EMBEDDINGS" ]; then
     USE_LOCAL_EMBEDDINGS=false
 fi
 
-if [ -n "$SKIP_FRONTEND" ]; then
+if [ -n "$SKIP_FRONTEND" ] || [ -n "$BACKEND_ONLY" ]; then
     echo "SKIP_FRONTEND is set - skipping frontend service"
     USE_FRONTEND=false
 fi
 
+# Convenience: frontend-only implies we keep frontend on and skip embeddings
+if [ -n "$FRONTEND_ONLY" ]; then
+    echo "FRONTEND_ONLY is set - enabling frontend and skipping local embeddings"
+    USE_FRONTEND=true
+    SKIP_LOCAL_EMBEDDINGS=1
+fi
+
+# Force-enable local embeddings if requested
+if [ -n "$WITH_LOCAL_EMBEDDINGS" ]; then
+    echo "WITH_LOCAL_EMBEDDINGS is set - forcing local embeddings service ON"
+    USE_LOCAL_EMBEDDINGS=true
+fi
+
 # Build compose command with profiles (default: enable both)
 COMPOSE_CMD_WITH_OPTS="$COMPOSE_CMD -f docker/docker-compose.yml"
+
+# Add WSL override if requested (routes backend to host Postgres, sets extra_hosts, etc.)
+if [ -n "$WSL_OVERRIDE" ]; then
+    echo "Using WSL host-postgres override"
+    COMPOSE_CMD_WITH_OPTS="$COMPOSE_CMD_WITH_OPTS -f docker/wsl-host-postgres.override.yml"
+fi
 if [ "$USE_LOCAL_EMBEDDINGS" = true ]; then
     echo "Starting with local embeddings service (text2vec-transformers)"
     COMPOSE_CMD_WITH_OPTS="$COMPOSE_CMD_WITH_OPTS --profile local-embeddings"

@@ -14,6 +14,18 @@ search_defaults:
 # Model specifications per provider
 # Defines available models and their properties
 provider_models:
+  local:
+    embedding:
+      name: "local-text2vec-transformers"
+      tokenizer: "cl100k_base"  # unused, placeholder for schema consistency
+      dimensions: 384
+      max_tokens: 8191
+
+  ollama:
+    llm:
+      name: "gemma:7b"
+      tokenizer: "cl100k_base"  # approximate for budgeting
+      context_window: 8192
   openai:
     llm_big:
       name: "gpt-5"
@@ -100,6 +112,10 @@ operation_preferences:
 
   embed_query:
     order:
+      - provider: local
+        llm: null
+        embedding: embedding
+        rerank: null
       - provider: openai
         llm: null
         embedding: embedding
@@ -122,6 +138,10 @@ operation_preferences:
 
   generate_answer:
     order:
+      - provider: ollama
+        llm: llm
+        embedding: null
+        rerank: null
       - provider: cerebras
         llm: llm
         embedding: null

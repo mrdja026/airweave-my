@@ -127,6 +127,10 @@ class Settings(BaseSettings):
     CEREBRAS_API_KEY: Optional[str] = None
     AZURE_KEYVAULT_NAME: Optional[str] = None
 
+    # Local LLM (Ollama) configuration
+    OLLAMA_BASE_URL: Optional[str] = None  # e.g., http://host.docker.internal:11434
+    OLLAMA_MODEL: Optional[str] = None     # e.g., gemma:7b
+
     # Temporal configuration
     TEMPORAL_HOST: str = "localhost"
     TEMPORAL_PORT: int = 7233
