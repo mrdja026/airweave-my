@@ -56,19 +56,21 @@ if [[ "$ROWS_ONLY" == "true" ]]; then
   {
     echo "# EOD (Rows) — ${PROJECT} — ${PROMPT_DATE}"
     echo
-    # Group by table_name and print bullets for summary-like fields
+    # Robust rendering even if .results is null or empty
     jq -r '
       def picktext: .payload.summary_text // .payload.md_content // .payload.embeddable_text // .payload.content // empty;
-      .results
-      | (map(.payload.table_name) | unique // []) as $tables
-      | if ($tables | length) == 0 then "No results." else
-          ($tables[] | select(. != null)) as $t
-          | "\n## " + $t + "\n"
-          , ( .results
-              | map(select(.payload.table_name == $t))
-              | map("- " + (picktext))
-              | .[] )
-        end' "$TMP"
+      if ((.results // []) | length) == 0 then
+        "No results."
+      else
+        (.results // []) as $rows |
+        ($rows | map(.payload.table_name) | unique // []) as $tables |
+        ( $tables[] | select(. != null) ) as $t |
+        "\n## " + $t + "\n",
+        ( $rows
+          | map(select(.payload.table_name == $t))
+          | map("- " + (picktext))
+          | .[] )
+      end' "$TMP"
   } > "$OUT"
   echo "Saved rows to $OUT"
   exit 0
@@ -82,7 +84,8 @@ curl -s -X POST "${API_URL}/collections/${COLLECTION}/search" \
 COMPLETION=$(jq -r '.completion // .message // empty' "$TMP")
 if [[ -z "$COMPLETION" || "$COMPLETION" == "null" ]]; then
   echo "No completion returned; falling back to rows." >&2
-  ROWS_ONLY=true OUT="$OUT" "$0"
+  ROWS_ONLY=true OUT="$OUT" API_URL="$API_URL" COLLECTION="$COLLECTION" PROJECT="$PROJECT" PROMPT_DATE="$PROMPT_DATE" \
+    bash "$0"
   exit 0
 fi
 
@@ -93,4 +96,3 @@ fi
 } > "$OUT"
 
 echo "Saved EOD to $OUT"
-

@@ -53,16 +53,14 @@ WITH
 SELECT
   proj.id AS project_id,
   proj.name AS project_name,
-  FORMAT(
-    'Constraints for %s on %s — Due next 7 days: %s (next: %s). Availability events today: %s (%s). Planned items: %s, planned cost today: %.2f.',
-    proj.name,
-    TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD'),
-    COALESCE(d.due_next_7::text, '0'),
-    COALESCE(TO_CHAR(d.next_deadline, 'YYYY-MM-DD'), 'n/a'),
-    COALESCE(a.availability_events::text, '0'),
-    COALESCE(a.availability_notes, 'none'),
-    COALESCE(pc.planned_items::text, '0'),
-    COALESCE(pc.planned_cost_today, 0)
+  (
+    'Constraints for ' || proj.name || ' on ' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') ||
+    ' — Due next 7 days: ' || COALESCE(d.due_next_7::text, '0') ||
+    ' (next: ' || COALESCE(TO_CHAR(d.next_deadline, 'YYYY-MM-DD'), 'n/a') || '). ' ||
+    'Availability events today: ' || COALESCE(a.availability_events::text, '0') ||
+    ' (' || COALESCE(a.availability_notes, 'none') || '). ' ||
+    'Planned items: ' || COALESCE(pc.planned_items::text, '0') || ', planned cost today: ' ||
+    TO_CHAR(COALESCE(pc.planned_cost_today, 0), 'FM999999990.00')
   ) AS summary_text
 FROM p proj
 LEFT JOIN due_items d ON d.project_id = proj.id
@@ -74,4 +72,3 @@ COMMIT;
 
 -- Checks:
 -- SELECT * FROM public.project_constraints_text WHERE project_name='BigCompany';
-

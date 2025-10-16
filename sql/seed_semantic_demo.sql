@@ -86,15 +86,15 @@ WITH base AS (
     project_name,
     -- Dev stats
     COUNT(*) FILTER (WHERE is_dev)                AS dev_count,
-    COALESCE(STRING_AGG(employee_name FILTER (WHERE is_dev) ORDER BY employee_name, ', '), 'none') AS dev_names,
+    COALESCE(STRING_AGG(employee_name, ', ' ORDER BY employee_name) FILTER (WHERE is_dev), 'none') AS dev_names,
     COALESCE(SUM(hourly_rate) FILTER (WHERE is_dev), 0)::NUMERIC(10,2) AS dev_cost,
     -- Non-dev stats
     COUNT(*) FILTER (WHERE NOT is_dev)            AS nondev_count,
-    COALESCE(STRING_AGG(employee_name FILTER (WHERE NOT is_dev) ORDER BY employee_name, ', '), 'none') AS nondev_names,
+    COALESCE(STRING_AGG(employee_name, ', ' ORDER BY employee_name) FILTER (WHERE NOT is_dev), 'none') AS nondev_names,
     COALESCE(SUM(hourly_rate) FILTER (WHERE NOT is_dev), 0)::NUMERIC(10,2) AS nondev_cost,
     -- Lead stats
     COUNT(*) FILTER (WHERE is_lead)               AS lead_count,
-    COALESCE(STRING_AGG(employee_name FILTER (WHERE is_lead) ORDER BY employee_name, ', '), 'none') AS lead_names,
+    COALESCE(STRING_AGG(employee_name, ', ' ORDER BY employee_name) FILTER (WHERE is_lead), 'none') AS lead_names,
     -- Totals
     COUNT(*)                                      AS total_count,
     COALESCE(SUM(hourly_rate), 0)::NUMERIC(10,2)  AS total_cost
@@ -104,19 +104,12 @@ WITH base AS (
 SELECT
   project_id,
   project_name,
-  FORMAT(
-    'Project %s has %s devs (%s), costing %.2f. It has %s non-devs (%s), costing %.0f. Total staff %s, cost %.2f. Leads: %s (count %s).',
-    project_name,
-    dev_count,
-    dev_names,
-    dev_cost,
-    nondev_count,
-    nondev_names,
-    nondev_cost,
-    total_count,
-    total_cost,
-    lead_names,
-    lead_count
+  (
+    'Project ' || project_name ||
+    ' has ' || dev_count || ' devs (' || dev_names || '), costing ' || TO_CHAR(dev_cost, 'FM999999990.00') || '. ' ||
+    'It has ' || nondev_count || ' non-devs (' || nondev_names || '), costing ' || TO_CHAR(nondev_cost, 'FM999999990') || '. ' ||
+    'Total staff ' || total_count || ', cost ' || TO_CHAR(total_cost, 'FM999999990.00') || '. ' ||
+    'Leads: ' || lead_names || ' (count ' || lead_count || ').'
   ) AS summary_text
 FROM agg
 ORDER BY project_id;
@@ -128,4 +121,3 @@ COMMIT;
 -- Expect row like:
 --  project_id | project_name | summary_text
 --  1          | BigCompany   | Project BigCompany has 4 devs (Frank, Grace, Alice, Bob), costing 97.00. It has 0 non-devs (none), costing 0. Total staff 4, cost 97.00. Leads: none (count 0).
-

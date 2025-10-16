@@ -382,10 +382,34 @@ Query: List actions taken for BigCompany today (moves, assignments, emails). End
 Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}},{"key":"table_name","match":{"value":"performed_actions_text"}}]}
 ```
 
-7.5 Decisions only
-```
-Query: What CEO decisions were recorded for BigCompany today? Return decision and rationale. End with [[1]].
-Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}},{"key":"table_name","match":{"value":"ceo_decisions_text"}}]}
+7.5 Decisions only (via Deliverables)
+
+Note: The standalone `ceo_decisions_text` view does not include `project_name`, so project‑scoped filters will drop all rows. Use the unified deliverables view instead and filter by `section=decision`.
+
+- Prompt (Generate Answer ON):
+  - What CEO decisions were recorded for BigCompany today? Return decision and rationale. End with [[1]].
+- Filters (no Code panel):
+  - Add these three must filters in the UI:
+    - project_name = BigCompany
+    - table_name   = eod_deliverables_text
+    - section      = decision
+
+Curl equivalent:
+```bash
+curl -s -X POST 'http://localhost:8001/collections/helloworld-e4fh2w/search' \
+  -H 'Content-Type: application/json' --data '{
+  "query":"What CEO decisions were recorded for BigCompany today? Return decision and rationale. End with [[1]].",
+  "retrieval_strategy":"hybrid",
+  "generate_answer":true,
+  "expand_query":false,
+  "interpret_filters":false,
+  "rerank":true,
+  "filter":{"must":[
+    {"key":"project_name","match":{"value":"BigCompany"}},
+    {"key":"table_name","match":{"value":"eod_deliverables_text"}},
+    {"key":"section","match":{"value":"decision"}}
+  ]}
+}'
 ```
 
 7.6 Incident deep‑dive (today)
@@ -533,6 +557,28 @@ curl -sS -X POST 'http://localhost:8001/collections/helloworld-e4fh2w/search' \
   Where the new rows appear
 
   - Event inserts (acceleration, new lead, sick leave)
+
+---
+
+## 9) One‑Click: Simulate → Re‑Sync → Export EOD
+
+Run a full day in one step. This executes the Observe→Plan→Act→Log SQL, re‑syncs Actions/Decisions and Deliverables/Constraints sources, and exports a Markdown EOD.
+
+```bash
+# Adjust variables as needed; defaults shown below
+make simulate-and-export \
+  HOST_PG_PORT=5432 PG_USER=postgres PG_DB=postgres \
+  API_URL=http://localhost:8001 COLLECTION=helloworld-e4fh2w \
+  PROJECT=BigCompany PROMPT_DATE="Oct 16, 2025"
+```
+
+Notes
+- If your actions/decisions or deliverables sources have custom names, set ACTIONS_SOURCE_ID / DELIV_SOURCE_ID env vars and call the script directly:
+  ```bash
+  ACTIONS_SOURCE_ID=<uuid> DELIV_SOURCE_ID=<uuid> \
+  bash airweave/scripts/simulate_and_export.sh
+  ```
+- Output file path: `Demo/EOD_${PROJECT}_YYYY-MM-DD.md`.
       - Base table: public.project_events
       - Indexed view: public.project_event_history_text
       - In Airweave, after re-sync, you’ll see results with payload.table_name = "project_event_history_text" (entity type
