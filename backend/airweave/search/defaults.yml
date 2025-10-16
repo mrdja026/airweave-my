@@ -26,6 +26,11 @@ provider_models:
       name: "gemma:7b"
       tokenizer: "cl100k_base"  # approximate for budgeting
       context_window: 8192
+    rerank:
+      name: "gemma:7b"
+      tokenizer: "cl100k_base"
+      context_window: 8192
+      max_documents: 50
   openai:
     llm_big:
       name: "gpt-5"
@@ -123,6 +128,10 @@ operation_preferences:
 
   reranking:
     order:
+      - provider: ollama
+        llm: llm
+        embedding: null
+        rerank: rerank
       - provider: cohere
         llm: null
         embedding: null
