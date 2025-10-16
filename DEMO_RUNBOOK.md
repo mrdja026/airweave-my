@@ -291,6 +291,42 @@ Follow this sequence live; everything stays local (WSL Postgres + Ollama):
 
 That’s it — you will see a grounded summary driven by local retrieval and local inference, with actions/decisions captured in Postgres and immediately searchable.
 
+## With reasonign 
+
+• Great—since you’re using Ollama (gemma:7b) for answer generation, you can get a concise “reasoning” section by asking the
+  model to include a short rationale in the output. Keep Generate Answer ON so the backend routes to Ollama.
+
+  Use this exact prompt and settings:
+
+  - Prompt:
+      - End-of-day summary for BigCompany for Oct 16, 2025: list today’s events (incident, new lead, sick leave), actions
+        taken (moves, assignments, emails), and rationale. Then add a section titled “Model Reasoning (concise)” with 3–5
+        short bullets explaining key signals from the retrieved rows, stated as verifiable justifications (no hidden chain-
+        of-thought). Include assumptions, tradeoffs, and a one-line confidence. End with [[1]].
+  - Retrieval: Hybrid
+  - Generate Answer: ON
+  - Expansion: OFF
+  - Rerank: OFF
+  - Interpret Filters: OFF
+  - Filter:
+      - {"must":[{"key":"project_name","match":{"value":"BigCompany"}}]}
+
+  Notes
+
+  - This prompts gemma:7b to write a brief reasoning summary (e.g., “We prioritized the incident because it’s ‘High’
+    priority and open today; CSV export due 2025‑10‑20 sets timebox; Alice sick → reassignment to Grace”). It avoids step-
+    by-step chain-of-thought while still giving clear, auditable justification.
+  - Keep the “[[]][1]” suffix to satisfy the UI’s citation gate if needed.
+  - Make sure OLLAMA_BASE_URL and OLLAMA_MODEL=gemma:7b are set in airweave/.env (you already have this), and that the
+    backend was started with those envs (WSL override path you’re using is fine).
+
+  Optional structured variant (if you prefer stricter formatting)
+
+  - Prompt:
+      - Produce Markdown with sections: Events Today, Actions Taken, Rationale, Model Reasoning (concise), Next Steps. In
+        “Model Reasoning (concise)”, give 3–5 bullets with evidence-based justifications, one “Assumptions” bullet, and a
+        final “Confidence: low/medium/high”. Use only retrieved facts. End with [[1]].
+
 ---
 
 ## 7) Export as Markdown (Auto‑Download)
