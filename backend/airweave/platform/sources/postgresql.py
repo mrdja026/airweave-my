@@ -1037,7 +1037,9 @@ class PostgreSQLSource(BaseSource):
                 requested = [t.strip() for t in tables_cfg.split(",") if t.strip()]
                 # If no valid tables after filtering, skip validation (will default to all)
                 if requested:
-                    available = await self._get_tables(schema)
+                    # When specific names are provided, allow both BASE TABLE and VIEW
+                    # Note: _get_table_list() also permits views; validation must match runtime
+                    available = await self._get_tables_and_views(schema)
                     missing = [t for t in requested if t not in available]
                     if missing:
                         self.logger.error(

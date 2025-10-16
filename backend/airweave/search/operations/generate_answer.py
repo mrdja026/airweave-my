@@ -8,6 +8,7 @@ with inline citations.
 from typing import Any, Dict, List
 
 from airweave.api.context import ApiContext
+from airweave.core.config import settings
 from airweave.search.context import SearchContext
 from airweave.search.prompts import GENERATE_ANSWER_SYSTEM_PROMPT
 from airweave.search.providers._base import BaseProvider
@@ -47,12 +48,36 @@ class GenerateAnswer(SearchOperation):
 
         results = state.get("results")
 
+        # Early guard: no results at all → strict fallback message
         if not results:
-            state["completion"] = "No results found for your query."
+            fallback = "No relevant information found in this collection."
+            # Emit completion start/done for consistent SSE behavior
+            await context.emitter.emit("completion_start", {}, op_name=self.__class__.__name__)
+            state["completion"] = fallback
+            await context.emitter.emit(
+                "completion_done", {"text": fallback}, op_name=self.__class__.__name__
+            )
             return
 
         if not isinstance(results, list):
             raise ValueError(f"Expected 'results' to be a list, got {type(results)}")
+
+        # Relevance threshold gate (strict RAG): if max score below threshold, skip LLM
+        try:
+            scores = [r.get("score", 0.0) for r in results if isinstance(r, dict)]
+            max_score = max(scores) if scores else 0.0
+        except Exception:
+            max_score = 0.0
+
+        min_score = getattr(settings, "STRICT_RAG_MIN_SCORE", 0.12)
+        if max_score < float(min_score):
+            fallback = "No relevant information found in this collection."
+            await context.emitter.emit("completion_start", {}, op_name=self.__class__.__name__)
+            state["completion"] = fallback
+            await context.emitter.emit(
+                "completion_done", {"text": fallback}, op_name=self.__class__.__name__
+            )
+            return
 
         # Emit completion start
         # Note: Model name not included since we don't know which provider will succeed yet
@@ -95,6 +120,23 @@ class GenerateAnswer(SearchOperation):
 
         if not completion or not completion.strip():
             raise RuntimeError("Provider returned empty completion")
+
+        # Post-process: enforce strict RAG behavior
+        # 1) Normalize generic refusals with no citations to strict fallback
+        # 2) If there are zero [[N]] citations, treat as non-grounded → strict fallback
+        lowered = completion.lower()
+        refusal_markers = [
+            "unable to access real-time information",
+            "cannot access external information",
+            "unable to access external information",
+            "for the most up-to-date information",
+            "personally identifiable data",
+            "i am unable to",
+            "i cannot",
+        ]
+        has_citations = "[[" in completion and "]]" in completion
+        if (any(marker in lowered for marker in refusal_markers) and not has_citations) or not has_citations:
+            completion = "No relevant information found in this collection."
 
         state["completion"] = completion
 

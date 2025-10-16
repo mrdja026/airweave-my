@@ -181,6 +181,11 @@ class Settings(BaseSettings):
     QDRANT_FULL_URL: Optional[str] = None
     ADDITIONAL_CORS_ORIGINS: Optional[str] = None  # Separated by commas or semicolons
 
+    # Strict RAG behavior
+    # If the top retrieval score is below this threshold, skip LLM and return
+    # the strict fallback: "No relevant information found in this collection."
+    STRICT_RAG_MIN_SCORE: float = 0.12
+
     @field_validator("AZURE_KEYVAULT_NAME", mode="before")
     def validate_azure_keyvault_name(cls, v: Optional[str], info: ValidationInfo) -> Optional[str]:
         """Create a keyvault name based on the environment.

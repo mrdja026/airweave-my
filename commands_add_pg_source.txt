@@ -1,0 +1,35 @@
+Purpose
+- Add a new PostgreSQL source to collection `helloworld-e4fh2w` that targets your semantic view (`project_team_summary_text`) and the `employees` table.
+- No heredocs; copy each one‑liner exactly as a single line.
+
+Prereqs
+- Backend is healthy at http://localhost:8001/health
+- Your Postgres is reachable from Docker. For Windows Postgres with Docker Desktop/WSL, prefer host.docker.internal. Otherwise, use the Windows IP shown in /etc/resolv.conf inside WSL.
+
+Linux/macOS (bash/zsh) — Create source (ONE SINGLE LINE)
+# Windows Postgres via Docker/WSL (recommended): host.docker.internal
+curl -sS -X POST 'http://localhost:8001/source-connections' -H 'Content-Type: application/json' --data '{"short_name":"postgresql","readable_collection_id":"helloworld-e4fh2w","name":"WSL Postgres","authentication":{"credentials":{"host":"host.docker.internal","port":5432,"database":"postgres","user":"postgres","password":"smederevo026","schema":"public","tables":"project_team_summary_text,employees"}},"sync_immediately":true}'
+
+# Or, using the Windows IP as seen from WSL
+# WINDOWS_IP=$(awk '/nameserver/ {print $2; exit}' /etc/resolv.conf); echo $WINDOWS_IP
+# curl -sS -X POST 'http://localhost:8001/source-connections' -H 'Content-Type: application/json' --data '{"short_name":"postgresql","readable_collection_id":"helloworld-e4fh2w","name":"WSL Postgres","authentication":{"credentials":{"host":"REPLACE_WITH_WINDOWS_IP","port":5432,"database":"postgres","user":"postgres","password":"smederevo026","schema":"public","tables":"project_team_summary_text,employees"}},"sync_immediately":true}'
+
+Windows PowerShell — Create source
+$body = @{ short_name = 'postgresql'; readable_collection_id = 'helloworld-e4fh2w'; name = 'WSL Postgres'; authentication = @{ credentials = @{ host = 'host.docker.internal'; port = 5432; database = 'postgres'; user = 'postgres'; password = 'smederevo026'; schema = 'public'; tables = 'project_team_summary_text,employees' } }; sync_immediately = $true } | ConvertTo-Json -Depth 6; Invoke-RestMethod -Method Post -Uri 'http://localhost:8001/source-connections' -ContentType 'application/json' -Body $body
+
+Verify connections for the collection
+curl -sS 'http://localhost:8001/source-connections?collection=helloworld-e4fh2w' | jq .
+
+Monitor sync jobs
+curl -sS 'http://localhost:8001/sync/jobs' | jq .
+
+Stream a specific job (replace JOB_ID from the previous output)
+curl -N -sS "http://localhost:8001/sync/job/JOB_ID/subscribe"
+
+Test retrieval from the semantic view only (expect concise answer with [[N]] citation)
+curl -N -sS -H 'Accept: text/event-stream' -H 'Content-Type: application/json' -X POST 'http://localhost:8001/collections/helloworld-e4fh2w/search/stream' --data '{"query":"Summarize team and costs for project 1.","retrieval_strategy":"hybrid","generate_answer":true,"expand_query":false,"interpret_filters":false,"rerank":false,"filter":{"must":[{"key":"table_name","match":{"value":"project_team_summary_text"}}]}}'
+
+Notes
+- Keep each curl on one physical line. Do not insert backslashes or line breaks inside the JSON.
+- If host.docker.internal doesn't resolve for your Docker Engine, use the Windows IP from `/etc/resolv.conf` inside WSL.
+- If sync can’t connect, ensure Postgres is listening on all interfaces (listen_addresses='*') and pg_hba.conf allows md5 from Docker while testing; restart Postgres afterwards.

@@ -227,11 +227,22 @@ class SyncService:
         self,
         db: AsyncSession,
         ctx: ApiContext,
-        sync_id: UUID,
+        sync_id: Optional[UUID] = None,
+        skip: int = 0,
         limit: int = 100,
+        status: Optional[List[str]] = None,
     ) -> List[SyncJob]:
-        """List sync jobs for a sync."""
-        return await crud.sync_job.get_all_by_sync_id(db, sync_id=sync_id)
+        """List sync jobs.
+
+        - If sync_id is provided: return jobs for that sync (optionally filtered by status).
+        - Otherwise: return jobs across all syncs with pagination and optional status filter.
+        """
+        if sync_id is not None:
+            jobs = await crud.sync_job.get_all_by_sync_id(db, sync_id=sync_id, status=status)
+            # Apply limit locally for backward compatibility
+            return jobs[:limit] if limit is not None else jobs
+        else:
+            return await crud.sync_job.get_all_jobs(db, skip=skip, limit=limit, status=status)
 
     async def get_last_sync_job(
         self,
