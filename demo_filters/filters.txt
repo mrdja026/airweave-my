@@ -1,0 +1,110 @@
+# Ready-to-use JSON filters for Airweave demo
+# Copy a JSON block below into the "filter" field under --data when calling the API.
+
+# team_summary_for_project_bigcompany
+{"must":[
+  {"key":"table_name","match":{"value":"project_team_summary_text"}},
+  {"key":"project_name","match":{"value":"BigCompany"}}
+]}
+
+# employees_only
+{"must":[
+  {"key":"table_name","match":{"value":"employees"}}
+]}
+
+# events_all
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}}
+]}
+
+# events_for_project_bigcompany
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}},
+  {"key":"project_name","match":{"value":"BigCompany"}}
+]}
+
+# events_open_high_priority
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}},
+  {"key":"status","match":{"value":"Open"}},
+  {"key":"priority","match":{"value":"High"}}
+]}
+
+# events_by_client_a
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}},
+  {"key":"client_name","match":{"value":"Client A"}}
+]}
+
+# events_open
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}},
+  {"key":"status","match":{"value":"Open"}}
+]}
+
+# events_open_bigcompany
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}},
+  {"key":"project_name","match":{"value":"BigCompany"}},
+  {"key":"status","match":{"value":"Open"}}
+]}
+
+# events_high_priority
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}},
+  {"key":"priority","match":{"value":"High"}}
+]}
+
+# change_requests_all
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}},
+  {"key":"event_type","match":{"value":"Change Request"}}
+]}
+
+# change_requests_open_bigcompany
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}},
+  {"key":"project_name","match":{"value":"BigCompany"}},
+  {"key":"event_type","match":{"value":"Change Request"}},
+  {"key":"status","match":{"value":"Open"}}
+]}
+
+# accelerations
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}},
+  {"key":"event_type","match":{"value":"Acceleration"}}
+]}
+
+# availability_issues
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}},
+  {"key":"event_type","match":{"value":"Availability"}}
+]}
+
+# new_leads
+{"must":[
+  {"key":"table_name","match":{"value":"project_event_history_text"}},
+  {"key":"event_type","match":{"value":"New Lead"}}
+]}
+
+# actions_all
+{"must":[
+  {"key":"table_name","match":{"value":"performed_actions_text"}}
+]}
+
+# actions_for_project_bigcompany
+{"must":[
+  {"key":"table_name","match":{"value":"performed_actions_text"}},
+  {"key":"project_name","match":{"value":"BigCompany"}}
+]}
+
+# decisions_all
+{"must":[
+  {"key":"table_name","match":{"value":"ceo_decisions_text"}}
+]}
+
+# everything (search across all sources/tables)
+{}
+
+# everything_must_empty (alternative empty structure if UI requires `must` key)
+{"must":[]}
