@@ -136,6 +136,37 @@ Script details:
 - Path: `scripts/eod_export.sh`
 - Reads: `API_URL`, `COLLECTION`, `PROJECT`, `PROMPT_DATE`, `ROWS_ONLY`, `RERANK`, `OUT`.
 - Default output: `Demo/EOD_${PROJECT}_YYYY-MM-DD.md`.
+
+## Simulation + Constraints + Deliverables (SQL)
+Run these once to enable the full Observe → Plan → Act → Log loop and deliverables view:
+
+```
+# 0) Ensure base seed is applied (projects, employees, events)
+make seed-db HOST_PG_PORT=5432 PG_USER=postgres PG_DB=airweave
+
+# 1) Create actions/decisions tables + views
+make seed-actions HOST_PG_PORT=5432 PG_USER=postgres PG_DB=airweave
+
+# 2) Add constraints table/view (work plans + summary)
+make apply-constraints HOST_PG_PORT=5432 PG_USER=postgres PG_DB=airweave
+
+# 3) Add unified EOD deliverables view
+make apply-deliverables HOST_PG_PORT=5432 PG_USER=postgres PG_DB=airweave
+
+# 4) Simulate today (inserts work_plan rows, actions, CEO decisions)
+make simulate-day HOST_PG_PORT=5432 PG_USER=postgres PG_DB=airweave
+
+# 5) Re-sync and export EOD
+make list-sources
+CONS_SOURCE_ID=<id> make resync
+make eod-export PROJECT=BigCompany PROMPT_DATE="Oct 16, 2025"
+```
+
+Quick SQL spot-checks:
+- `SELECT * FROM public.project_constraints_text WHERE project_name='BigCompany';`
+- `SELECT * FROM public.performed_actions_text ORDER BY created_at DESC LIMIT 5;`
+- `SELECT * FROM public.ceo_decisions_text ORDER BY created_at DESC LIMIT 5;`
+- `SELECT * FROM public.eod_deliverables_text WHERE project_name='BigCompany' ORDER BY ts DESC LIMIT 10;`
 ```
 
 Notes

@@ -329,7 +329,142 @@ That’s it — you will see a grounded summary driven by local retrieval and lo
 
 ---
 
-## 7) Export as Markdown (Auto‑Download)
+## 7) UI Testing Prompts (Generate Answer ON)
+
+Status (Oct 16, 2025)
+- Working: EOD CEO, Deliverables, Incident Deep‑Dive, New Lead, Availability, CSV one‑day plan, Client Email, Constraints (with temporal_relevance: 0.0).
+- Not yet working: Actions only, Decisions only (see 7.11 for quick fix and alternatives).
+
+Use these ready-to-paste requests in the UI Code panel. Unless noted, keep:
+- Retrieval: Hybrid
+- Generate Answer: ON
+- Expansion: OFF
+- Interpret Filters: OFF
+- Rerank: ON
+- Base filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}}]}
+
+7.1 End‑of‑Day (CEO) with concise reasoning
+```
+Query: End-of-day summary for BigCompany for Oct 16, 2025: list today’s events (incident, new lead, sick leave), actions taken (moves, assignments, emails), and rationale. Then add a section titled “Model Reasoning (concise)” with 3–5 short bullets explaining key signals from the retrieved rows, stated as verifiable justifications (no hidden chain-of-thought). Include assumptions, tradeoffs, and a one-line confidence. End with [[1]].
+Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}}]}
+```
+
+7.2 Deliverables (events + actions + decisions)
+```
+Query: End-of-day deliverables for BigCompany (today). List key events, actions, and decisions. End with [[1]].
+Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}},{"key":"table_name","match":{"value":"eod_deliverables_text"}}]}
+```
+
+7.3 Constraints snapshot (hours-only view)
+Note: set temporal_relevance to 0.0 in the Code JSON to avoid recency decay on single-timestamp sets.
+```
+Body:
+{
+  "query": "Summarize constraints for BigCompany today. End with [[1]].",
+  "retrieval_strategy": "hybrid",
+  "generate_answer": true,
+  "expand_query": false,
+  "interpret_filters": false,
+  "temporal_relevance": 0.0,
+  "rerank": true,
+  "filter": {
+    "must": [
+      {"key":"project_name","match":{"value":"BigCompany"}},
+      {"key":"table_name","match":{"value":"project_constraints_text"}}
+    ]
+  }
+}
+```
+
+7.4 Actions only
+```
+Query: List actions taken for BigCompany today (moves, assignments, emails). End with [[1]].
+Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}},{"key":"table_name","match":{"value":"performed_actions_text"}}]}
+```
+
+7.5 Decisions only
+```
+Query: What CEO decisions were recorded for BigCompany today? Return decision and rationale. End with [[1]].
+Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}},{"key":"table_name","match":{"value":"ceo_decisions_text"}}]}
+```
+
+7.6 Incident deep‑dive (today)
+```
+Query: Summarize today’s production incident for BigCompany: impact, status, mitigations, and next steps. End with [[1]].
+Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}},{"key":"table_name","match":{"value":"project_event_history_text"}},{"key":"event_type","match":{"value":"Incident: critical bug"}}]}
+```
+
+7.7 New lead (today) → plan
+```
+Query: A new lead asked for a proposal within 48 hours. Draft a short plan with owners, discovery questions, and a proposal outline. End with [[1]].
+Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}},{"key":"table_name","match":{"value":"project_event_history_text"}},{"key":"event_type","match":{"value":"New Lead"}}]}
+```
+
+7.8 Availability (today) → reassignment
+```
+Query: One engineer is out sick today. Recommend task reassignments to keep deadlines on track and note risks. End with [[1]].
+Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}},{"key":"table_name","match":{"value":"project_event_history_text"}},{"key":"event_type","match":{"value":"Availability"}}]}
+```
+
+7.9 CSV export (due 2025‑10‑20) → one‑day plan
+```
+Query: One‑day plan to deliver Accounts CSV export with filter parity by 2025‑10‑20. Include owners (BE/FE/QA/SRE/PM), milestones, acceptance, and risks. End with [[1]].
+Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}},{"key":"table_name","match":{"value":"project_event_history_text"}}]}
+```
+
+7.10 Client email (status update)
+```
+Query: Draft a client email for BigCompany summarizing the export incident mitigation and the CSV export plan due Oct 20. Keep it professional and concise. End with [[1]].
+Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}}]}
+```
+
+Tips
+- If you see “No relevant information…”, include “End with [[1]]” once to satisfy the citation gate, or widen the filter to the base filter.
+- For constraints completions, set temporal_relevance to 0.0 in the Code JSON (or turn the UI’s recency slider to 0).
+
+7.11 Actions/Decisions — quick fixes if no rows appear
+
+Reason: The collection may not be indexing the two standalone views yet. Two options:
+
+- Option A (recommended): create a tiny Postgres source for just the two views, then re‑sync.
+  ```bash
+  curl -sS -X POST 'http://localhost:8001/source-connections' \
+    -H 'Content-Type: application/json' \
+    --data '{
+      "short_name": "postgresql",
+      "readable_collection_id": "helloworld-e4fh2w",
+      "name": "WSL Postgres Actions/Decisions",
+      "authentication": {"credentials": {
+        "host": "host.docker.internal", "port": 5432, "database": "postgres",
+        "user": "postgres", "password": "smederevo026", "schema": "public",
+        "tables": "performed_actions_text,ceo_decisions_text"
+      }},
+      "sync_immediately": true
+    }'
+  ```
+  Verify job completion, then retry 7.4 and 7.5.
+
+- Option B (alternative filter via Deliverables): use the combined view with a section filter.
+  - Actions only:
+    ```
+    Query: List actions taken for BigCompany today (moves, assignments, emails). End with [[1]].
+    Filter: {"must":[
+      {"key":"project_name","match":{"value":"BigCompany"}},
+      {"key":"table_name","match":{"value":"eod_deliverables_text"}},
+      {"key":"section","match":{"value":"action"}}
+    ]}
+    ```
+  - Decisions only:
+    ```
+    Query: What CEO decisions were recorded for BigCompany today? Return decision and rationale. End with [[1]].
+    Filter: {"must":[
+      {"key":"project_name","match":{"value":"BigCompany"}},
+      {"key":"table_name","match":{"value":"eod_deliverables_text"}},
+      {"key":"section","match":{"value":"decision"}}
+    ]}
+    ```
+
+## 8) Export as Markdown (Auto‑Download)
 
 ### 7.1 Browser (DevTools) — one‑click download
 
