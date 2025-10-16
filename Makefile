@@ -16,7 +16,7 @@ PROMPT_DATE     ?= today
 .PHONY: help seed-db seed-actions apply-constraints apply-deliverables simulate-day \
         build-backend backend-reload worker-reload reload health \
         list-sources resync eod-curl eod-curl-rows ui-eod ui-eod-rows \
-        eod-export eod-export-rows
+        eod-export eod-export-rows simulate-and-export
 
 help:
 	@echo "Targets:"
@@ -34,6 +34,7 @@ help:
 	@echo "  resync            - Re-sync a source (requires CONS_SOURCE_ID=<id>)"
 	@echo "  eod-curl          - Sanity EOD query (completion with [[1]])"
 	@echo "  eod-curl-rows     - Retrieval-only rows for debugging"
+	@echo "  simulate-and-export- Simulate today, re-sync, export EOD"
 
 seed-db:
 	psql -h $(HOST) -p $(HOST_PG_PORT) -U $(PG_USER) -d $(PG_DB) -f sql/seed_semantic_demo.sql
@@ -92,7 +93,7 @@ eod-curl:
 		    ]
 		  }
 		}
-JSON
+	JSON
 
 eod-curl-rows:
 	@curl -s -X POST '$(API_URL)/collections/$(COLLECTION)/search' \
@@ -107,15 +108,38 @@ eod-curl-rows:
 		  "rerank": true,
 		  "filter": {"must": [{"key": "project_name", "match": {"value": "BigCompany"}}]}
 		}
-JSON
+	JSON
 
 eod-export:
-	@PROJECT=$(PROJECT) PROMPT_DATE=$(PROMPT_DATE) API_URL=$(API_URL) COLLECTION=$(COLLECTION) \
+	@env \
+	  PROJECT="$(PROJECT)" \
+	  PROMPT_DATE="$(PROMPT_DATE)" \
+	  API_URL="$(API_URL)" \
+	  COLLECTION="$(COLLECTION)" \
 	  bash scripts/eod_export.sh
 
 eod-export-rows:
-	@PROJECT=$(PROJECT) PROMPT_DATE=$(PROMPT_DATE) API_URL=$(API_URL) COLLECTION=$(COLLECTION) ROWS_ONLY=true \
+	@env \
+	  PROJECT="$(PROJECT)" \
+	  PROMPT_DATE="$(PROMPT_DATE)" \
+	  API_URL="$(API_URL)" \
+	  COLLECTION="$(COLLECTION)" \
+	  ROWS_ONLY=true \
 	  bash scripts/eod_export.sh
+
+	simulate-and-export:
+		@env \
+	  API_URL="$(API_URL)" \
+	  COLLECTION="$(COLLECTION)" \
+	  PG_HOST="$(HOST)" \
+	  PG_PORT="$(HOST_PG_PORT)" \
+	  PG_USER="$(PG_USER)" \
+	  PG_DB="$(PG_DB)" \
+	  PROJECT="$(PROJECT)" \
+	  PROMPT_DATE="$(PROMPT_DATE)" \
+	  ACTIONS_SOURCE_ID="$(ACTIONS_SOURCE_ID)" \
+	  DELIV_SOURCE_ID="$(DELIV_SOURCE_ID)" \
+	  bash scripts/simulate_and_export.sh
 
 # Print a ready-to-paste UI request body (completion with concise reasoning)
 ui-eod:

@@ -343,9 +343,9 @@ Use these ready-to-paste requests in the UI Code panel. Unless noted, keep:
 - Rerank: ON
 - Base filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}}]}
 
-7.1 End‑of‑Day (CEO) with concise reasoning
+7.1 End‑of‑Day (CEO) with broader reasoning
 ```
-Query: End-of-day summary for BigCompany for Oct 16, 2025: list today’s events (incident, new lead, sick leave), actions taken (moves, assignments, emails), and rationale. Then add a section titled “Model Reasoning (concise)” with 3–5 short bullets explaining key signals from the retrieved rows, stated as verifiable justifications (no hidden chain-of-thought). Include assumptions, tradeoffs, and a one-line confidence. End with [[1]].
+Query: End-of-day summary for BigCompany for Oct 16, 2025: list today’s events (incident, new lead, sick leave), actions taken (moves, assignments, emails), and rationale. Then add a section titled “Model Reasoning (broad)” with 8–12 evidence-based bullets, grouped across: Drivers, Constraints, Risks, Trade-offs, Alternatives, Dependencies, Assumptions, Unknowns, and Confidence. Each bullet should be a verifiable justification grounded in retrieved facts (no hidden chain-of-thought). End with [[1]].
 Filter: {"must":[{"key":"project_name","match":{"value":"BigCompany"}}]}
 ```
 

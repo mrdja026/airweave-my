@@ -34,7 +34,7 @@ body() {
   local generate_answer=$1
   cat <<JSON
 {
-  "query": "End-of-day summary for ${PROJECT} for ${PROMPT_DATE}: list today’s events (incident, new lead, sick leave), actions taken (moves, assignments, emails), and rationale. Then add a section titled \"Model Reasoning (concise)\" with 3–5 short bullets explaining key signals from the retrieved rows, stated as verifiable justifications (no hidden chain-of-thought). Include assumptions, tradeoffs, and a one-line confidence. End with [[1]].",
+  "query": "End-of-day summary for ${PROJECT} for ${PROMPT_DATE}: list today’s events (incident, new lead, sick leave), actions taken (moves, assignments, emails), and rationale. Then add a section titled \"Model Reasoning (broad)\" with 8–12 evidence-based bullets, grouped across: Drivers, Constraints, Risks, Trade-offs, Alternatives, Dependencies, Assumptions, Unknowns, and Confidence. Each bullet should be a verifiable justification grounded in retrieved facts (no hidden chain-of-thought). End with [[1]].",
   "retrieval_strategy": "hybrid",
   "generate_answer": ${generate_answer},
   "expand_query": false,
