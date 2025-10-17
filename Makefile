@@ -16,7 +16,7 @@ PROMPT_DATE     ?= today
 .PHONY: help seed-db seed-actions apply-constraints apply-deliverables simulate-day \
         build-backend backend-reload worker-reload reload health \
         list-sources resync eod-curl eod-curl-rows ui-eod ui-eod-rows \
-        eod-export eod-export-rows simulate-and-export
+        eod-export eod-export-rows simulate-and-export ui-tests
 
 help:
 	@echo "Targets:"
@@ -35,6 +35,7 @@ help:
 	@echo "  eod-curl          - Sanity EOD query (completion with [[1]])"
 	@echo "  eod-curl-rows     - Retrieval-only rows for debugging"
 	@echo "  simulate-and-export- Simulate today, re-sync, export EOD"
+	@echo "  ui-tests          - Run Section 7 scenarios and save Markdown"
 
 seed-db:
 	psql -h $(HOST) -p $(HOST_PG_PORT) -U $(PG_USER) -d $(PG_DB) -f sql/seed_semantic_demo.sql
@@ -176,3 +177,26 @@ ui-eod-rows:
 		  }
 		}
 		JSON
+
+ui-tests:
+	@env \
+	  API_URL="$(API_URL)" \
+	  COLLECTION="$(COLLECTION)" \
+	  PROJECT="$(PROJECT)" \
+	  PROMPT_DATE="$(PROMPT_DATE)" \
+	  OUTDIR="$(OUTDIR)" \
+	  bash scripts/ui_test_suite.sh
+
+.PHONY: sick-leave
+sick-leave:
+	@env \
+	  API_URL="$(API_URL)" \
+	  COLLECTION="$(COLLECTION)" \
+	  PG_HOST="$(HOST)" \
+	  PG_PORT="$(HOST_PG_PORT)" \
+	  PG_USER="$(PG_USER)" \
+	  PG_DB="$(PG_DB)" \
+	  PROJECT="$(PROJECT)" \
+	  PLAN_DATE="$(PROMPT_DATE)" \
+	  DUE_DATE="$(DUE_DATE)" \
+	  bash scripts/sick_leave_and_resync.sh
